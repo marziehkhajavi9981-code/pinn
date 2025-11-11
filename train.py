@@ -43,7 +43,7 @@ def mse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 def main(args: argparse.Namespace) -> None:
     cfg = TrainConfig()
     # CLI overrides
-    if args.device: cfg.device = args.device
+    if args.device is not None: cfg.device = args.device
     if args.hidden: cfg.hidden = tuple(map(int, args.hidden.split(',')))
     if args.double is not None: cfg.use_double_precision = bool(args.double)
     if args.save_dir: cfg.save_dir = args.save_dir
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     parser.add_argument("--v", type=str, required=True, help="Path to v_stack.npz with key 'V'")
     parser.add_argument("--crop_h", type=int, default=64, help="Crop height")
     parser.add_argument("--crop_w", type=int, default=64, help="Crop width")
-    parser.add_argument("--device", type=str, default='cpu', help="cuda or cpu (overrides config)")
+    parser.add_argument("--device", type=str, default=None, help="cuda or cpu (overrides config)")
     parser.add_argument("--hidden", type=str, default=None, help="Comma-separated hidden sizes, e.g., 64,64,64,64")
     parser.add_argument("--double", type=int, default=None, help="1 to use float64, 0 for float32")
     parser.add_argument("--save_dir", type=str, default=None, help="Output directory for figures")

@@ -92,7 +92,7 @@ class PhysicsInformedNN(nn.Module):
         du_dX = torch.autograd.grad(u, X, grad_outputs=torch.ones_like(u),
                                     retain_graph=True, create_graph=True)[0]
         dv_dX = torch.autograd.grad(v, X, grad_outputs=torch.ones_like(v),
-                                    retain_graph=False, create_graph=True)[0]
+                                    retain_graph=True, create_graph=True)[0]
         u_x, u_y = du_dX[:, 0:1], du_dX[:, 1:2]
         v_x, v_y = dv_dX[:, 0:1], dv_dX[:, 1:2]
         return u_x, u_y, v_x, v_y
@@ -113,7 +113,7 @@ class PhysicsInformedNN(nn.Module):
         # Physics loss
         if physics_minibatch is None or physics_minibatch <= 0:
             u_x, u_y, v_x, v_y = self.grads_xy(self.Xph)
-            L_div = self.mse(u_x + v_y, self.ux_t + self.vy_t)
+            L_div = self.mse(u_x + v_y, torch.zeros_like(u_x))
             L_vort = self.mse(v_x - u_y, self.vx_t - self.uy_t)
             L_ux = self.mse(u_x, self.ux_t)
             L_vy = self.mse(v_y, self.vy_t)
@@ -124,13 +124,14 @@ class PhysicsInformedNN(nn.Module):
             n_chunks = math.ceil(n / physics_minibatch)
             for i in range(n_chunks):
                 s = slice(i * physics_minibatch, min((i + 1) * physics_minibatch, n))
+                m = s.stop - s.start
                 u_x, u_y, v_x, v_y = self.grads_xy(self.Xph[s])
-                L_div = L_div + self.mse(u_x + v_y, self.ux_t[s] + self.vy_t[s])
-                L_vort = L_vort + self.mse(v_x - u_y, self.vx_t[s] - self.uy_t[s])
-                L_ux = L_ux + self.mse(u_x, self.ux_t[s])
-                L_vy = L_vy + self.mse(v_y, self.vy_t[s])
-            # average over chunks
-            L_div /= n_chunks; L_vort /= n_chunks; L_ux /= n_chunks; L_vy /= n_chunks
+                L_div = L_div + self.mse(u_x + v_y, torch.zeros_like(u_x)) * m
+                L_vort = L_vort + self.mse(v_x - u_y, self.vx_t[s] - self.uy_t[s]) * m
+                L_ux = L_ux + self.mse(u_x, self.ux_t[s]) * m
+                L_vy = L_vy + self.mse(v_y, self.vy_t[s]) * m
+            # average over samples (not chunks)
+            L_div /= n; L_vort /= n; L_ux /= n; L_vy /= n
 
         L_ph = self.w_div * L_div + self.w_vort * L_vort + self.w_ux * L_ux + self.w_vy * L_vy
         L_tot = self.w_data * L_data + L_ph
@@ -161,7 +162,7 @@ class PhysicsInformedNN(nn.Module):
             opt.step()
             self._log(parts, float(L.detach().cpu()), log_every)
             if it % (log_every * 10) == 0:
-                print(f"[Adam {it:05d}] total={float(L):.4e} data={parts['data']:.3e} div={parts['div']:.3e} vort={parts['vort']:.3e} ux={parts['ux']:.3e} vy={parts['vy']:.3e}")
+                print(f"[Adam {it:05d}] total={float(L.detach().cpu()):.4e} data={parts['data']:.3e} div={parts['div']:.3e} vort={parts['vort']:.3e} ux={parts['ux']:.3e} vy={parts['vy']:.3e}")
 
     def train_lbfgs(self, maxiter: int, history_size: int, use_strong_wolfe: bool = False,
                      physics_mb: Optional[int] = None, log_every: int = 10) -> None:

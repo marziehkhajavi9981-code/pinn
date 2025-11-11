@@ -4,7 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class TrainConfig:
     # Model / training
-    hidden: tuple = (64, 64, 64, 64)
+    hidden: tuple = (128, 128, 128, 128)
     use_double_precision: bool = True           # float64 usually stabilizes PINNs
     device: str = "cpu"                        # "cuda" or "cpu"
 
@@ -22,7 +22,7 @@ class TrainConfig:
     # Optimizers
     adam_lr: float = 1e-3
     adam_steps: int = 2000
-    lbfgs_maxiter: int = 600
+    lbfgs_maxiter: int = 2000
     lbfgs_history: int = 50
     lbfgs_use_strong_wolfe: bool = False        # safer off on CUDA
 
