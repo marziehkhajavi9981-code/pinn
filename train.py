@@ -16,11 +16,13 @@ This will:
 import argparse
 import os
 import time
+from typing import Tuple
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from config import TrainConfig
-from data.grids import (crop_stacks, make_space_time_grids, initial_condition_samples,
+from data.grids import (crop_stacks, make_space_time_grids,
                         boundary_condition_samples, finite_differences, random_physics_samples)
 from pinn.pinn import PhysicsInformedNN
 from utils.vis import plot_losses, imshow3, plot_vorticity, quiver_field, ensure_dir
@@ -40,6 +42,46 @@ def mse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean((y_true - y_pred) ** 2))
 
 
+def all_point_samples(Xg: np.ndarray, Yg: np.ndarray, t: np.ndarray,
+                      Uc: np.ndarray, Vc: np.ndarray, stride: int = 1) -> Tuple[np.ndarray, np.ndarray]:
+    """Build supervision from every (x,y,t) lattice point in the cropped stacks.
+    
+    Args:
+        Xg, Yg: meshgrids [h, w]
+        t: time array [N]
+        Uc, Vc: velocity stacks [N, h, w]
+        stride: sample every stride-th timestep (default=1 for all frames)
+    
+    Returns:
+        X_all: [N', h, w, 3] coordinates (x, y, t), where N' = N // stride
+        uv_all: [N', h, w, 2] velocities (u, v)
+    """
+    # Apply stride to temporal dimension
+    t_sampled = t[::stride]
+    Uc_sampled = Uc[::stride]
+    Vc_sampled = Vc[::stride]
+    
+    N_sampled, h, w = Uc_sampled.shape
+    
+    # Build spatial coordinates [h, w, 2]
+    xy = np.stack([Xg, Yg], axis=-1).astype(np.float32)  # [h, w, 2]
+    
+    # Broadcast to [N', h, w, 2]
+    xy_full = np.broadcast_to(xy[None, :, :, :], (N_sampled, h, w, 2)).copy()
+    
+    # Build time coordinates [N', h, w, 1]
+    t_full = t_sampled[:, None, None, None].astype(np.float32)  # [N', 1, 1, 1]
+    t_full = np.broadcast_to(t_full, (N_sampled, h, w, 1)).copy()  # [N', h, w, 1]
+    
+    # Concatenate to get [N', h, w, 3]
+    X_all = np.concatenate([xy_full, t_full], axis=-1)
+    
+    # Stack velocities to get [N', h, w, 2]
+    uv_all = np.stack([Uc_sampled, Vc_sampled], axis=-1).astype(np.float32)
+    
+    return X_all, uv_all
+
+
 def main(args: argparse.Namespace) -> None:
     cfg = TrainConfig()
     # CLI overrides
@@ -47,6 +89,9 @@ def main(args: argparse.Namespace) -> None:
     if args.hidden: cfg.hidden = tuple(map(int, args.hidden.split(',')))
     if args.double is not None: cfg.use_double_precision = bool(args.double)
     if args.save_dir: cfg.save_dir = args.save_dir
+    if args.time_stride is not None: cfg.time_stride = args.time_stride
+    if args.model_type is not None: cfg.model_type = args.model_type.lower()
+    if args.conv_channels: cfg.conv_channels = tuple(map(int, args.conv_channels.split(',')))
 
     ensure_dir(cfg.save_dir)
 
@@ -55,64 +100,108 @@ def main(args: argparse.Namespace) -> None:
         torch.set_default_dtype(torch.float64)
 
     # --------------- Load data ---------------
+    print("Loading data...")
     U = np.load(args.u)["U"].astype(np.float32)  # [N,H,W]
     V = np.load(args.v)["V"].astype(np.float32)
     N, H, W = U.shape
-    print(f"Loaded U,V with shape: {U.shape} {V.shape}")
+    print(f"✓ Loaded U,V with shape: {U.shape} {V.shape}")
 
+    print(f"Cropping to {args.crop_h}x{args.crop_w}...")
     Uc, Vc = crop_stacks(U, V, args.crop_h, args.crop_w)
     N, h, w = Uc.shape
-    print(f"Cropped to: {Uc.shape}")
+    print(f"✓ Cropped to: {Uc.shape}")
 
     # --------------- Coordinates ---------------
+    print("Building coordinate grids...")
     dx = dy = dt = 1.0
     x, y, t, Xg, Yg = make_space_time_grids(N, h, w, dx, dy, dt)
+    print(f"✓ Created grids: x={x.shape}, y={y.shape}, t={t.shape}")
 
-    # --------------- IC/BC supervised samples ---------------
-    X_ic, uv_ic = initial_condition_samples(Xg, Yg, Uc[0], Vc[0])
-    X_bc, uv_bc = boundary_condition_samples(x, y, t, Uc, Vc)
-    X_u = np.vstack([X_ic, X_bc]).astype(np.float32)
-    uv = np.vstack([uv_ic, uv_bc]).astype(np.float32)
+    # --------------- Supervised samples ---------------
+    if cfg.time_stride > 1:
+        n_frames_sampled = len(range(0, N, cfg.time_stride))
+        print(f"Building supervised samples with time stride={cfg.time_stride} ({n_frames_sampled}/{N} frames, {n_frames_sampled*h*w} points)...")
+    else:
+        print(f"Building supervised samples (all {N*h*w} spacetime points)...")
+    
+    X_u, uv = all_point_samples(Xg, Yg, t, Uc, Vc, stride=cfg.time_stride)  # [N', h, w, 3], [N', h, w, 2]
+    print(f"✓ X_u shape: {X_u.shape}, uv shape: {uv.shape}")
+    
+    if cfg.use_boundary_conditions:
+        print("Adding boundary condition samples...")
+        X_bc, uv_bc = boundary_condition_samples(x, y, t, Uc, Vc)  # [M, 3], [M, 2]
+        # Flatten all-points and append BC
+        X_u = np.vstack([X_u.reshape(-1, 3), X_bc]).astype(np.float32)  # [N*h*w+M, 3]
+        uv = np.vstack([uv.reshape(-1, 2), uv_bc]).astype(np.float32)   # [N*h*w+M, 2]
+        print(f"✓ Added {X_bc.shape[0]} BC samples. Total: {X_u.shape[0]} points")
 
     # --------------- Physics targets (FD) ---------------
-    Ux, Uy, Vx, Vy = finite_differences(Uc, Vc, dy=dy, dx=dx)
-    X_ph, ph_targets_np = random_physics_samples(x, y, t, Ux, Uy, Vx, Vy, cfg.n_physics, seed=0)
+    print(f"Computing finite differences and sampling {cfg.n_physics} physics points...")
+    Ux, Uy, Vx, Vy = finite_differences(Uc, Vc, dy=dy, dx=dx)  # each [N, h, w]
+    X_ph, ph_targets_np = random_physics_samples(x, y, t, Ux, Uy, Vx, Vy, cfg.n_physics, seed=0)  # [n_physics, 3], dict of [n_physics, 1]
+    print(f"✓ Physics samples: {X_ph.shape}")
 
     # --------------- Bounds for normalization ---------------
     lb = np.array([x.min(), y.min(), t.min()], dtype=np.float32)
     ub = np.array([x.max(), y.max(), t.max()], dtype=np.float32)
 
     # --------------- Torch tensors ---------------
+    print("Converting to PyTorch tensors...")
     device = cfg.device
     dtype = torch.float64 if cfg.use_double_precision else torch.float32
-    X_u_t = torch.as_tensor(X_u, dtype=dtype)
-    uv_t = torch.as_tensor(uv, dtype=dtype)
-    X_ph_t = torch.as_tensor(X_ph, dtype=dtype)
-    ph_targets_t = {k: torch.as_tensor(v, dtype=dtype) for k, v in ph_targets_np.items()}
-    lb_t = torch.as_tensor(lb, dtype=dtype)
-    ub_t = torch.as_tensor(ub, dtype=dtype)
+    
+    # Convert to tensors, keeping original shapes
+    X_u_t = torch.as_tensor(X_u, dtype=dtype)  # [N, h, w, 3] or [M, 3] if BC added
+    uv_t = torch.as_tensor(uv, dtype=dtype)    # [N, h, w, 2] or [M, 2] if BC added
+    X_ph_t = torch.as_tensor(X_ph, dtype=dtype)  # [n_physics, 3]
+    ph_targets_t = {k: torch.as_tensor(v, dtype=dtype) for k, v in ph_targets_np.items()}  # each [n_physics, 1]
+    lb_t = torch.as_tensor(lb, dtype=dtype)  # [3]
+    ub_t = torch.as_tensor(ub, dtype=dtype)  # [3]
+    print(f"✓ Converted to torch tensors on device: {device}")
 
     # --------------- Model ---------------
+    if cfg.model_type == "mlp":
+        print(f"Building PINN (MLP) with {len(cfg.hidden)} hidden layers: {cfg.hidden}...")
+    elif cfg.model_type == "conv2d":
+        print(f"Building PINN (Conv2D) with channels: {cfg.conv_channels}...")
+    elif cfg.model_type == "conv3d":
+        print(f"Building PINN (Conv3D) with channels: {cfg.conv_channels}...")
+    
     weights = {"data": cfg.w_data, "div": cfg.w_div, "vort": cfg.w_vort, "ux": cfg.w_ux, "vy": cfg.w_vy}
     model = PhysicsInformedNN(X_u=X_u_t, uv=uv_t, X_ph=X_ph_t, ph_targets=ph_targets_t,
                               hidden_layers=cfg.hidden, lb=lb_t, ub=ub_t,
-                              weights=weights, device=device, use_double=cfg.use_double_precision)
+                              weights=weights, device=device, use_double=cfg.use_double_precision,
+                              model_type=cfg.model_type, conv_channels=cfg.conv_channels)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"✓ Model created with {n_params:,} parameters")
 
     # --------------- Train ---------------
+    print(f"\n{'='*60}")
+    print(f"Starting training on device: {device}")
+    print(f"  - Data points: {model.Xu.shape[0]:,}")
+    print(f"  - Physics points: {model.Xph.shape[0]:,}")
+    print(f"  - Loss weights: data={cfg.w_data}, div={cfg.w_div}, vort={cfg.w_vort}")
+    print(f"{'='*60}\n")
+    
     start = time.time()
-    print("\n[Stage 1] Adam warmup...")
+    print("[Stage 1] Adam warmup...")
     model.train_adam(steps=cfg.adam_steps, lr=cfg.adam_lr, physics_mb=cfg.physics_minibatch, log_every=cfg.log_every)
 
     print("\n[Stage 2] LBFGS polish...")
     model.train_lbfgs(maxiter=cfg.lbfgs_maxiter, history_size=cfg.lbfgs_history,
                       use_strong_wolfe=cfg.lbfgs_use_strong_wolfe, physics_mb=cfg.physics_minibatch,
                       log_every=cfg.log_every)
-    print(f"Total training time: {time.time() - start:.2f}s")
+    
+    elapsed = time.time() - start
+    print(f"\n{'='*60}")
+    print(f"✓ Training complete! Total time: {elapsed:.2f}s ({elapsed/60:.1f} min)")
+    print(f"{'='*60}\n")
 
     # --------------- Loss curves ---------------
     plot_losses(model.loss_hist, save_dir=cfg.save_dir)
 
     # --------------- Evaluate on a frame ---------------
+    print("Evaluating model on test frame...")
     frame_eval = min(120, N - 1)
     X_star = np.stack([Xg.ravel(), Yg.ravel(), np.full(h * w, t[frame_eval], np.float32)], axis=1)
     uv_pred = model.predict(X_star)
@@ -122,15 +211,18 @@ def main(args: argparse.Namespace) -> None:
     u_true = Uc[frame_eval]
     v_true = Vc[frame_eval]
 
-    print(f"RelL2(u): {np.linalg.norm(u_true - U_pred) / (np.linalg.norm(u_true) + 1e-12):.3e}")
-    print(f"MSE(u)={mse(u_true, U_pred):.4e}, R2(u)={r2(u_true, U_pred):.4f}")
-    print(f"MSE(v)={mse(v_true, V_pred):.4e}, R2(v)={r2(v_true, V_pred):.4f}")
+    print(f"\nEvaluation metrics (frame {frame_eval}):")
+    print(f"  RelL2(u): {np.linalg.norm(u_true - U_pred) / (np.linalg.norm(u_true) + 1e-12):.3e}")
+    print(f"  MSE(u)={mse(u_true, U_pred):.4e}, R2(u)={r2(u_true, U_pred):.4f}")
+    print(f"  MSE(v)={mse(v_true, V_pred):.4e}, R2(v)={r2(v_true, V_pred):.4f}")
 
     # --------------- Visual debug ---------------
+    print(f"\nSaving visualizations to {cfg.save_dir}/...")
     imshow3(u_true, U_pred, np.abs(u_true - U_pred), titles=("u true", "u pred", "|error|"),
             fname=os.path.join(cfg.save_dir, "u_triptych.png"))
     imshow3(v_true, V_pred, np.abs(v_true - V_pred), titles=("v true", "v pred", "|error|"),
             fname=os.path.join(cfg.save_dir, "v_triptych.png"))
+    print("  ✓ u_triptych.png, v_triptych.png")
 
     # vorticity maps
     dU_dy, dU_dx = np.gradient(u_true, 1.0, 1.0)
@@ -142,10 +234,13 @@ def main(args: argparse.Namespace) -> None:
     omega_pred = dVpred_dx - dUpred_dy
 
     plot_vorticity(omega_true, omega_pred, fname=os.path.join(cfg.save_dir, "omega_triptych.png"))
+    print("  ✓ omega_triptych.png")
 
     # Optional: quiver plots (downsample)
     quiver_field(u_true, v_true, step=4, title="velocity true", fname=os.path.join(cfg.save_dir, "quiver_true.png"))
     quiver_field(U_pred, V_pred, step=4, title="velocity pred", fname=os.path.join(cfg.save_dir, "quiver_pred.png"))
+    print("  ✓ quiver_true.png, quiver_pred.png")
+    print("\n✅ All done!")
 
 
 if __name__ == "__main__":
@@ -155,7 +250,11 @@ if __name__ == "__main__":
     parser.add_argument("--crop_h", type=int, default=64, help="Crop height")
     parser.add_argument("--crop_w", type=int, default=64, help="Crop width")
     parser.add_argument("--device", type=str, default=None, help="cuda or cpu (overrides config)")
-    parser.add_argument("--hidden", type=str, default=None, help="Comma-separated hidden sizes, e.g., 64,64,64,64")
+    parser.add_argument("--model_type", type=str, default=None, choices=["mlp", "conv2d", "conv3d"],
+                        help="Model architecture: mlp (default), conv2d, or conv3d")
+    parser.add_argument("--hidden", type=str, default=None, help="Comma-separated hidden sizes for MLP, e.g., 64,64,64,64")
+    parser.add_argument("--conv_channels", type=str, default=None, help="Comma-separated channels for Conv2D/Conv3D, e.g., 32,64,64,32")
     parser.add_argument("--double", type=int, default=None, help="1 to use float64, 0 for float32")
     parser.add_argument("--save_dir", type=str, default=None, help="Output directory for figures")
+    parser.add_argument("--time_stride", type=int, default=None, help="Sample every N-th timestep (1=all frames, 2=every other, etc.)")
     main(parser.parse_args())

@@ -20,8 +20,17 @@ def crop_stacks(U: np.ndarray, V: np.ndarray, crop_h: int, crop_w: int) -> Tuple
 def make_space_time_grids(N: int, h: int, w: int, dx: float = 1.0, dy: float = 1.0, dt: float = 1.0):
     """Create 1D space/time arrays and a 2D XY meshgrid.
 
+    Args:
+        N: number of time steps
+        h, w: spatial dimensions
+        dx, dy, dt: grid spacings
+    
     Returns:
-        x, y, t, Xg, Yg
+        x: [w] x-coordinates
+        y: [h] y-coordinates
+        t: [N] time coordinates
+        Xg: [h, w] x-meshgrid
+        Yg: [h, w] y-meshgrid
     """
     x = np.arange(w, dtype=np.float32) * dx
     y = np.arange(h, dtype=np.float32) * dy
@@ -51,9 +60,11 @@ def boundary_condition_samples(x: np.ndarray, y: np.ndarray, t: np.ndarray,
 
     Args:
         x, y, t: 1D coordinate arrays
-        Uc, Vc: cropped stacks [N,h,w]
+        Uc, Vc: cropped stacks [N, h, w]
     Returns:
-        X_bc [(N*M),3], uv_bc [(N*M),2]
+        X_bc: [(N*M), 3]
+        uv_bc: [(N*M), 2]
+        where M is the number of boundary points per frame
     """
     N, h, w = Uc.shape
     mask = np.zeros((h, w), dtype=bool)
@@ -75,10 +86,10 @@ def finite_differences(U: np.ndarray, V: np.ndarray, dy: float, dx: float) -> Tu
     """Compute spatial grads using centered differences along (y,x) axes.
 
     Args:
-        U, V: arrays [N,h,w]
+        U, V: arrays [N, h, w]
         dy, dx: spacings
     Returns:
-        Ux, Uy, Vx, Vy: each [N,h,w]
+        Ux, Uy, Vx, Vy: each [N, h, w]
     """
     Uy, Ux = np.gradient(U, dy, dx, axis=(1, 2))
     Vy, Vx = np.gradient(V, dy, dx, axis=(1, 2))
@@ -90,8 +101,15 @@ def random_physics_samples(x: np.ndarray, y: np.ndarray, t: np.ndarray,
                            n_physics: int, seed: int = 0) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Sample random interior points (exclude boundary indices) and gather FD targets.
 
+    Args:
+        x, y, t: 1D coordinate arrays
+        Ux, Uy, Vx, Vy: spatial gradient arrays [N, h, w]
+        n_physics: number of random samples
+        seed: random seed
+    
     Returns:
-        X_ph [n,3], targets dict with keys 'ux','uy','vx','vy' (each [n,1])
+        X_ph: [n_physics, 3]
+        targets: dict with keys 'ux','uy','vx','vy' (each [n_physics, 1])
     """
     N, h, w = Ux.shape
     rng = np.random.default_rng(seed)
