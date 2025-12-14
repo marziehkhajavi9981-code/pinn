@@ -160,101 +160,8 @@ class PhysicsInformedNN(nn.Module):
         
         return u_x, u_y, v_x, v_y
     
-    def _compute_physics_grads(self, X_points: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute physics gradients for point-wise evaluation (used in physics loss).
-        
-        OPTIMIZED for Conv models: Evaluate full grid once, then sample at physics points.
-        
-        Args:
-            X_points: [batch, 3] physics evaluation points
-        Returns:
-            Four tensors [batch, 1] for u_x, u_y, v_x, v_y
-        """
-        if self.model_type == "mlp":
-            # Direct point evaluation for MLP
-            return self.grads_xy(X_points)
-        else:
-            # OPTIMIZED for Conv models: Evaluate full grid, then sample
-            return self._compute_physics_grads_conv_optimized(X_points)
     
-    def _compute_physics_grads_conv_optimized(self, X_points: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Optimized physics gradient computation for Conv models.
-        
-        Strategy:
-        1. Evaluate full grid [N, h, w, 3] → [N, h, w, 2] (ONE forward pass)
-        2. Compute gradients on full grid
-        3. Sample at physics point locations
-        
-        Args:
-            X_points: [batch, 3] physics points with (x, y, t) coordinates
-        Returns:
-            Four tensors [batch, 1] for u_x, u_y, v_x, v_y at sampled points
-        """
-        if self.grid_shape is None:
-            # Fallback to point-wise evaluation if no grid available
-            return self._compute_physics_grads_pointwise(X_points)
-        
-        N, h, w = self.grid_shape
-        
-        # Evaluate full grid with gradients enabled
-        X_grid = self.Xu.clone().detach().requires_grad_(True)  # [N, h, w, 3]
-        u_x_grid, u_y_grid, v_x_grid, v_y_grid = self.grads_xy(X_grid)  # Each [N, h, w, 1]
-        
-        # Sample at physics point locations
-        # X_points: [batch, 3] with values (x, y, t)
-        # We need to find which (n, i, j) index each point corresponds to
-        
-        # Extract grid coordinates from X_grid
-        x_coords = X_grid[0, :, :, 0]  # [h, w]
-        y_coords = X_grid[0, :, :, 1]  # [h, w]
-        t_coords = X_grid[:, 0, 0, 2]  # [N]
-        
-        # Find nearest grid indices for each physics point
-        batch_size = X_points.shape[0]
-        u_x_sampled = []
-        u_y_sampled = []
-        v_x_sampled = []
-        v_y_sampled = []
-        
-        for i in range(batch_size):
-            x_val, y_val, t_val = X_points[i, 0], X_points[i, 1], X_points[i, 2]
-            
-            # Find nearest indices (simple nearest neighbor)
-            n_idx = torch.argmin(torch.abs(t_coords - t_val))
-            j_idx = torch.argmin(torch.abs(x_coords[0, :] - x_val))
-            i_idx = torch.argmin(torch.abs(y_coords[:, 0] - y_val))
-            
-            u_x_sampled.append(u_x_grid[n_idx, i_idx, j_idx, :])
-            u_y_sampled.append(u_y_grid[n_idx, i_idx, j_idx, :])
-            v_x_sampled.append(v_x_grid[n_idx, i_idx, j_idx, :])
-            v_y_sampled.append(v_y_grid[n_idx, i_idx, j_idx, :])
-        
-        u_x_out = torch.stack(u_x_sampled, dim=0)  # [batch, 1]
-        u_y_out = torch.stack(u_y_sampled, dim=0)  # [batch, 1]
-        v_x_out = torch.stack(v_x_sampled, dim=0)  # [batch, 1]
-        v_y_out = torch.stack(v_y_sampled, dim=0)  # [batch, 1]
-        
-        return u_x_out, u_y_out, v_x_out, v_y_out
-    
-    def _compute_physics_grads_pointwise(self, X_points: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Fallback: point-wise evaluation (slow but works for any model)."""
-        X_points = X_points.clone().detach().requires_grad_(True)
-        Xn = self._norm(X_points)
-        
-        # Reshape to minimal grid structure for Conv
-        X_reshaped = Xn.unsqueeze(1).unsqueeze(1)  # [batch, 1, 1, 3]
-        uv = self.model(X_reshaped)  # [batch, 1, 1, 2]
-        uv = uv.squeeze(1).squeeze(1)  # [batch, 2]
-        
-        u, v = uv[:, 0:1], uv[:, 1:2]
-        du_dX = torch.autograd.grad(u, X_points, grad_outputs=torch.ones_like(u),
-                                   retain_graph=True, create_graph=True)[0]
-        dv_dX = torch.autograd.grad(v, X_points, grad_outputs=torch.ones_like(v),
-                                   retain_graph=True, create_graph=True)[0]
-        u_x, u_y = du_dX[:, 0:1], du_dX[:, 1:2]
-        v_x, v_y = dv_dX[:, 0:1], dv_dX[:, 1:2]
-        return u_x, u_y, v_x, v_y
-    
+
     def _sample_physics_from_grid(self, 
                                    u_x_grid: torch.Tensor, 
                                    u_y_grid: torch.Tensor,
@@ -343,7 +250,7 @@ class PhysicsInformedNN(nn.Module):
 
             # Physics loss
             if physics_minibatch is None or physics_minibatch <= 0:
-                u_x, u_y, v_x, v_y = self._compute_physics_grads(self.Xph)
+                u_x, u_y, v_x, v_y = self.grads_xy(self.Xph)
                 L_div = self.mse(u_x + v_y, torch.zeros_like(u_x))
                 L_vort = self.mse(v_x - u_y, self.vx_t - self.uy_t)
                 L_ux = self.mse(u_x, self.ux_t)
@@ -356,7 +263,7 @@ class PhysicsInformedNN(nn.Module):
                 for i in range(n_chunks):
                     s = slice(i * physics_minibatch, min((i + 1) * physics_minibatch, n))
                     m = s.stop - s.start
-                    u_x, u_y, v_x, v_y = self._compute_physics_grads(self.Xph[s])
+                    u_x, u_y, v_x, v_y = self.grads_xy(self.Xph[s])
                     L_div = L_div + self.mse(u_x + v_y, torch.zeros_like(u_x)) * m
                     L_vort = L_vort + self.mse(v_x - u_y, self.vx_t[s] - self.uy_t[s]) * m
                     L_ux = L_ux + self.mse(u_x, self.ux_t[s]) * m

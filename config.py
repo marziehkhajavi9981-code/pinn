@@ -27,8 +27,8 @@ class TrainConfig:
 
     # Optimizers
     adam_lr: float = 1e-3
-    adam_steps: int = 1000
-    lbfgs_maxiter: int = 1000
+    adam_steps: int = 100
+    lbfgs_maxiter: int = 100
     lbfgs_history: int = 50
     lbfgs_use_strong_wolfe: bool = False        # safer off on CUDA
 

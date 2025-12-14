@@ -240,7 +240,7 @@ def main(args: argparse.Namespace) -> None:
     quiver_field(u_true, v_true, step=4, title="velocity true", fname=os.path.join(cfg.save_dir, "quiver_true.png"))
     quiver_field(U_pred, V_pred, step=4, title="velocity pred", fname=os.path.join(cfg.save_dir, "quiver_pred.png"))
     print("  ✓ quiver_true.png, quiver_pred.png")
-    print("\n✅ All done!")
+    print("\n All done!")
 
 
 if __name__ == "__main__":
