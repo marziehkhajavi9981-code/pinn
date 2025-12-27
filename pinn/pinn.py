@@ -85,7 +85,7 @@ class PhysicsInformedNN(nn.Module):
             self.model = Conv2DNet(channels=conv_channels, in_channels=3, out_channels=2).to(self.device)
         elif self.model_type == "conv3d":
             # Use optimized Conv3D channels for similar parameter count
-            conv3d_channels = (11, 11) if conv_channels == (7, 22, 14) else conv_channels
+            conv3d_channels = conv_channels
             self.model = Conv3DNet(channels=conv3d_channels, in_channels=3, out_channels=2).to(self.device)
         else:
             raise ValueError(f"Unknown model_type: {self.model_type}. Choose 'mlp', 'conv2d', or 'conv3d'.")
@@ -134,7 +134,7 @@ class PhysicsInformedNN(nn.Module):
         Returns:
             Four tensors of gradients, same shape as input (minus last dim)
         """
-        X = X.clone().detach().requires_grad_(True)
+        X = X.clone().requires_grad_(True)
         uv = self.forward_uv(X)
         
         if self.model_type in ["conv2d", "conv3d"]:
@@ -224,7 +224,7 @@ class PhysicsInformedNN(nn.Module):
         # OPTIMIZED: For Conv models with grid data, compute full grid once
         if self.model_type in ["conv2d", "conv3d"] and self.grid_shape is not None:
             # Single forward pass on full grid (reused for both losses!)
-            X_grid = self.Xu.clone().detach().requires_grad_(True)
+            X_grid = self.Xu.clone().requires_grad_(True)
             uv_grid = self.forward_uv(X_grid)
             
             # Data loss from grid
@@ -248,14 +248,14 @@ class PhysicsInformedNN(nn.Module):
             uv_pred = self.forward_uv(self.Xu)
             L_data = self.mse(uv_pred, self.uv)
 
-            # Physics loss
+            # Physics loss # TODO Use samples
             if physics_minibatch is None or physics_minibatch <= 0:
                 u_x, u_y, v_x, v_y = self.grads_xy(self.Xph)
                 L_div = self.mse(u_x + v_y, torch.zeros_like(u_x))
                 L_vort = self.mse(v_x - u_y, self.vx_t - self.uy_t)
                 L_ux = self.mse(u_x, self.ux_t)
                 L_vy = self.mse(v_y, self.vy_t)
-            else:
+            else: #TODO Remove this
                 # Chunked evaluation to save memory
                 n = self.Xph.shape[0]
                 L_div = L_vort = L_ux = L_vy = 0.0

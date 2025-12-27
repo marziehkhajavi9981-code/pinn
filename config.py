@@ -4,7 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class TrainConfig:
     # Model / training
-    model_type: str = "mlp"                     # "mlp", "conv2d", or "conv3d"
+    model_type: str = "conv2d"                     # "mlp", "conv2d", or "conv3d"
     hidden: tuple = (64, 64, 64)                # for MLP (~8,706 params)
     conv_channels: tuple = (64, 64, 64)          # for Conv2D (~8,705 params) / Conv3D uses (11, 11) for ~8,054 params
     use_double_precision: bool = True           # float64 usually stabilizes PINNs
