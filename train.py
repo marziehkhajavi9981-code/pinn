@@ -185,12 +185,11 @@ def main(args: argparse.Namespace) -> None:
     
     start = time.time()
     print("[Stage 1] Adam warmup...")
-    model.train_adam(steps=cfg.adam_steps, lr=cfg.adam_lr, physics_mb=cfg.physics_minibatch, log_every=cfg.log_every)
+    model.train_adam(steps=cfg.adam_steps, lr=cfg.adam_lr, log_every=cfg.log_every)
 
     print("\n[Stage 2] LBFGS polish...")
     model.train_lbfgs(maxiter=cfg.lbfgs_maxiter, history_size=cfg.lbfgs_history,
-                      use_strong_wolfe=cfg.lbfgs_use_strong_wolfe, physics_mb=cfg.physics_minibatch,
-                      log_every=cfg.log_every)
+                      use_strong_wolfe=cfg.lbfgs_use_strong_wolfe, log_every=cfg.log_every)
     
     elapsed = time.time() - start
     print(f"\n{'='*60}")

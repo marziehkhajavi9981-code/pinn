@@ -1,5 +1,4 @@
-from typing import Dict, Tuple, Optional
-import math
+from typing import Dict, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -213,11 +212,9 @@ class PhysicsInformedNN(nn.Module):
         return u_x_sampled, u_y_sampled, v_x_sampled, v_y_sampled
 
     # ----------------------- losses ------------------------
-    def loss_fn(self, physics_minibatch: Optional[int] = None) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute total loss with optional physics minibatching.
+    def loss_fn(self) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute total loss using full physics batch.
 
-        Args:
-            physics_minibatch: if set, splits X_ph (& targets) into chunks.
         Returns:
             total loss tensor, and a dict of float scalars for logging
         """
@@ -248,28 +245,12 @@ class PhysicsInformedNN(nn.Module):
             uv_pred = self.forward_uv(self.Xu)
             L_data = self.mse(uv_pred, self.uv)
 
-            # Physics loss # TODO Use samples
-            if physics_minibatch is None or physics_minibatch <= 0:
-                u_x, u_y, v_x, v_y = self.grads_xy(self.Xph)
-                L_div = self.mse(u_x + v_y, torch.zeros_like(u_x))
-                L_vort = self.mse(v_x - u_y, self.vx_t - self.uy_t)
-                L_ux = self.mse(u_x, self.ux_t)
-                L_vy = self.mse(v_y, self.vy_t)
-            else: #TODO Remove this
-                # Chunked evaluation to save memory
-                n = self.Xph.shape[0]
-                L_div = L_vort = L_ux = L_vy = 0.0
-                n_chunks = math.ceil(n / physics_minibatch)
-                for i in range(n_chunks):
-                    s = slice(i * physics_minibatch, min((i + 1) * physics_minibatch, n))
-                    m = s.stop - s.start
-                    u_x, u_y, v_x, v_y = self.grads_xy(self.Xph[s])
-                    L_div = L_div + self.mse(u_x + v_y, torch.zeros_like(u_x)) * m
-                    L_vort = L_vort + self.mse(v_x - u_y, self.vx_t[s] - self.uy_t[s]) * m
-                    L_ux = L_ux + self.mse(u_x, self.ux_t[s]) * m
-                    L_vy = L_vy + self.mse(v_y, self.vy_t[s]) * m
-                # average over samples (not chunks)
-                L_div /= n; L_vort /= n; L_ux /= n; L_vy /= n
+            # Physics loss: full batch
+            u_x, u_y, v_x, v_y = self.grads_xy(self.Xph)
+            L_div = self.mse(u_x + v_y, torch.zeros_like(u_x))
+            L_vort = self.mse(v_x - u_y, self.vx_t - self.uy_t)
+            L_ux = self.mse(u_x, self.ux_t)
+            L_vy = self.mse(v_y, self.vy_t)
 
         L_ph = self.w_div * L_div + self.w_vort * L_vort + self.w_ux * L_ux + self.w_vy * L_vy
         L_tot = self.w_data * L_data + L_ph
@@ -291,12 +272,12 @@ class PhysicsInformedNN(nn.Module):
             for k, v in scalars.items():
                 self.loss_hist[k].append(v)
 
-    def train_adam(self, steps: int, lr: float, physics_mb: Optional[int] = None, log_every: int = 10) -> None:
+    def train_adam(self, steps: int, lr: float, log_every: int = 10) -> None:
         opt = optim.Adam(self.parameters(), lr=lr)
         pbar = tqdm(range(1, steps + 1), desc="Adam", unit="step")
         for it in pbar:
             opt.zero_grad()
-            L, parts = self.loss_fn(physics_minibatch=physics_mb)
+            L, parts = self.loss_fn()
             L.backward()
             opt.step()
             
@@ -316,7 +297,7 @@ class PhysicsInformedNN(nn.Module):
                 tqdm.write(f"[Adam {it:05d}] total={loss_val:.4e} data={parts['data']:.3e} div={parts['div']:.3e} vort={parts['vort']:.3e} ux={parts['ux']:.3e} vy={parts['vy']:.3e}")
 
     def train_lbfgs(self, maxiter: int, history_size: int, use_strong_wolfe: bool = False,
-                     physics_mb: Optional[int] = None, log_every: int = 10) -> None:
+                     log_every: int = 10) -> None:
         if use_strong_wolfe:
             optimizer = optim.LBFGS(self.parameters(), lr=1.0, max_iter=maxiter,
                                     history_size=history_size, line_search_fn='strong_wolfe',
@@ -331,7 +312,7 @@ class PhysicsInformedNN(nn.Module):
         
         def closure():
             optimizer.zero_grad()
-            L, parts = self.loss_fn(physics_minibatch=physics_mb)
+            L, parts = self.loss_fn()
             L.backward()
             
             loss_val = float(L.detach().cpu())
@@ -363,42 +344,24 @@ class PhysicsInformedNN(nn.Module):
         """Predict velocities at given points.
         
         Args:
-            X_star: [N, 3] array of (x, y, t) coordinates
+            X_star: [N, 3] array of (x, y, t) coordinates (assumes single time slice)
         
         Returns:
             [N, 2] array of (u, v) predictions
         """
         Xs = torch.as_tensor(X_star, dtype=torch.float64 if self.use_double else torch.float32, device=self.device)
         
-        # For Conv models, we need to reshape to grid format if possible
+        # For Conv models, reshape to grid format if grid_shape matches
         if self.model_type in ["conv2d", "conv3d"] and self.grid_shape is not None:
-            # Check if we're predicting on a single time slice
-            t_vals = X_star[:, 2]
-            unique_t = np.unique(t_vals)
+            _, h_grid, w_grid = self.grid_shape
+            n_points = X_star.shape[0]
             
-            if len(unique_t) == 1:
-                # Single time slice - reshape to [1, h, w, 3]
-                N_grid, h_grid, w_grid = self.grid_shape
-                n_points = X_star.shape[0]
-                
-                # Check if the number of points matches h*w
-                if n_points == h_grid * w_grid:
-                    # Reshape to grid format [1, h, w, 3]
-                    Xs_grid = Xs.reshape(1, h_grid, w_grid, 3)
-                    uv = self.forward_uv(Xs_grid).detach().cpu().numpy()
-                    # Flatten back to [N, 2]
-                    return uv.reshape(-1, 2)
-            
-            # For multiple time slices or non-matching dimensions, fall back to MLP-style
-            # We need to evaluate point by point or handle it differently
-            # For now, raise an error with a helpful message
-            if self.model_type in ["conv2d", "conv3d"]:
-                raise ValueError(
-                    f"Conv models require grid-structured input for prediction.\n"
-                    f"Expected single time slice with {self.grid_shape[1]*self.grid_shape[2]} points, "
-                    f"got {X_star.shape[0]} points with {len(unique_t)} unique time values.\n"
-                    f"Hint: For Conv models, predict on complete spatial grids at single time slices."
-                )
+            if n_points == h_grid * w_grid:
+                # Reshape to grid format [1, h, w, 3]
+                Xs_grid = Xs.reshape(1, h_grid, w_grid, 3)
+                uv = self.forward_uv(Xs_grid).detach().cpu().numpy()
+                # Flatten back to [N, 2]
+                return uv.reshape(-1, 2)
         
         # MLP path: direct prediction
         uv = self.forward_uv(Xs).detach().cpu().numpy()
