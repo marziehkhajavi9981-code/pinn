@@ -221,7 +221,7 @@ class PhysicsInformedNN(nn.Module):
         # OPTIMIZED: For Conv models with grid data, compute full grid once
         if self.model_type in ["conv2d", "conv3d"] and self.grid_shape is not None:
             # Single forward pass on full grid (reused for both losses!)
-            X_grid = self.Xu.clone().requires_grad_(True)
+            X_grid = self.Xu
             uv_grid = self.forward_uv(X_grid)
             
             # Data loss from grid

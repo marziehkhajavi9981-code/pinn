@@ -6,9 +6,9 @@ class TrainConfig:
     # Model / training
     model_type: str = "conv2d"                     # "mlp", "conv2d", or "conv3d"
     hidden: tuple = (64, 64, 64)                # for MLP (~8,706 params)
-    conv_channels: tuple = (16, 16, 16)          # for Conv2D (~8,705 params) / Conv3D uses (11, 11) for ~8,054 params
+    conv_channels: tuple = (64, 64, 64)          # for Conv2D (~8,705 params) / Conv3D uses (11, 11) for ~8,054 params
     use_double_precision: bool = True           # float64 usually stabilizes PINNs
-    device: str = "cuda"                        # "cuda" or "cpu"
+    device: str = "cpu"                        # "cuda" or "cpu"
     use_boundary_conditions: bool = False       # optionally include BC supervision
     
     # Data sampling
