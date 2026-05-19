@@ -30,15 +30,33 @@ def plot_losses(loss_hist: Dict[str, list], save_dir: Optional[str] = None) -> N
         plt.savefig(os.path.join(save_dir, "loss_history.png"), dpi=150)
     plt.show()
 
+    split_keys = ["train_data", "val_data", "test_data"]
+    if any(k in loss_hist and len(loss_hist[k]) > 0 for k in split_keys):
+        plt.figure(figsize=(8, 4))
+        for k in split_keys:
+            values = np.asarray(loss_hist.get(k, []), dtype=np.float64)
+            if values.size:
+                finite = np.isfinite(values)
+                if finite.any():
+                    plt.semilogy(np.where(finite, values, np.nan), label=k)
+        plt.xlabel("Iterations (logged)")
+        plt.ylabel("Masked data MSE (log)")
+        plt.title("Train / val / test data loss")
+        plt.legend()
+        plt.tight_layout()
+        if save_dir:
+            ensure_dir(save_dir)
+            plt.savefig(os.path.join(save_dir, "split_data_loss_history.png"), dpi=150)
+        plt.show()
+
 
 def imshow3(A: np.ndarray, B: np.ndarray, C: np.ndarray, titles=("A", "B", "|A-B|"),
             fname: Optional[str] = None) -> None:
-    """Show truth, prediction, and absolute error side-by-side."""
-    err = np.abs(A - B)
+    """Show three image-like arrays side-by-side."""
     plt.figure(figsize=(12, 4.2))
     plt.subplot(1, 3, 1); plt.imshow(A, origin="lower"); plt.title(titles[0]); plt.colorbar()
     plt.subplot(1, 3, 2); plt.imshow(B, origin="lower"); plt.title(titles[1]); plt.colorbar()
-    plt.subplot(1, 3, 3); plt.imshow(err, origin="lower"); plt.title(titles[2]); plt.colorbar()
+    plt.subplot(1, 3, 3); plt.imshow(C, origin="lower"); plt.title(titles[2]); plt.colorbar()
     plt.tight_layout()
     if fname:
         ensure_dir(os.path.dirname(fname))

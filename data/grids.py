@@ -98,7 +98,8 @@ def finite_differences(U: np.ndarray, V: np.ndarray, dy: float, dx: float) -> Tu
 
 def random_physics_samples(x: np.ndarray, y: np.ndarray, t: np.ndarray,
                            Ux: np.ndarray, Uy: np.ndarray, Vx: np.ndarray, Vy: np.ndarray,
-                           n_physics: int, seed: int = 0) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+                           n_physics: int, seed: int = 0,
+                           time_indices: np.ndarray = None) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Sample random interior points (exclude boundary indices) and gather FD targets.
 
     Args:
@@ -106,6 +107,7 @@ def random_physics_samples(x: np.ndarray, y: np.ndarray, t: np.ndarray,
         Ux, Uy, Vx, Vy: spatial gradient arrays [N, h, w]
         n_physics: number of random samples
         seed: random seed
+        time_indices: optional source frame indices to sample from
     
     Returns:
         X_ph: [n_physics, 3]
@@ -113,7 +115,15 @@ def random_physics_samples(x: np.ndarray, y: np.ndarray, t: np.ndarray,
     """
     N, h, w = Ux.shape
     rng = np.random.default_rng(seed)
-    k_idx = rng.integers(0, N, size=n_physics, dtype=np.int32)
+    if time_indices is None:
+        k_idx = rng.integers(0, N, size=n_physics, dtype=np.int32)
+    else:
+        time_indices = np.asarray(time_indices, dtype=np.int32)
+        if time_indices.size == 0:
+            raise ValueError("time_indices must not be empty")
+        if time_indices.min() < 0 or time_indices.max() >= N:
+            raise ValueError(f"time_indices must be within [0, {N - 1}]")
+        k_idx = rng.choice(time_indices, size=n_physics, replace=True).astype(np.int32)
     y_idx = rng.integers(1, h - 1, size=n_physics, dtype=np.int32)
     x_idx = rng.integers(1, w - 1, size=n_physics, dtype=np.int32)
 
@@ -124,4 +134,3 @@ def random_physics_samples(x: np.ndarray, y: np.ndarray, t: np.ndarray,
     vy_t = Vy[k_idx, y_idx, x_idx][:, None]
     targets = {"ux": ux_t, "uy": uy_t, "vx": vx_t, "vy": vy_t}
     return X_ph, targets
-

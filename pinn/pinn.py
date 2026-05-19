@@ -38,11 +38,17 @@ class PhysicsInformedNN(nn.Module):
                  device: str = "cuda",
                  use_double: bool = True,
                  model_type: str = "mlp",
-                 conv_channels: Tuple[int, ...] = (7, 22, 14)) -> None:
+                 conv_channels: Tuple[int, ...] = (7, 22, 14),
+                 data_mask: torch.Tensor = None,
+                 val_mask: torch.Tensor = None,
+                 test_mask: torch.Tensor = None) -> None:
         super().__init__()
         self.device = torch.device(device)
         self.use_double = use_double
         self.model_type = model_type.lower()
+        self.data_mask = None
+        self.val_mask = None
+        self.test_mask = None
 
         # Bounds for normalization
         self.lb = lb.to(self.device)  # [3]
@@ -58,6 +64,9 @@ class PhysicsInformedNN(nn.Module):
                 self.Xu = X_u.to(self.device)  # [N, h, w, 3]
                 self.uv = uv.to(self.device)   # [N, h, w, 2]
                 self.grid_shape = X_u.shape[:3]  # (N, h, w)
+                self.data_mask = self._prepare_mask(data_mask, self.grid_shape)
+                self.val_mask = self._prepare_mask(val_mask, self.grid_shape)
+                self.test_mask = self._prepare_mask(test_mask, self.grid_shape)
             else:
                 raise ValueError(f"{self.model_type} requires 4D input [N, h, w, 3], got shape {X_u.shape}")
         else:
@@ -66,9 +75,15 @@ class PhysicsInformedNN(nn.Module):
                 self.Xu = X_u.reshape(-1, X_u.shape[-1]).to(self.device)  # [N*h*w, 3]
                 self.uv = uv.reshape(-1, uv.shape[-1]).to(self.device)    # [N*h*w, 2]
                 self.grid_shape = X_u.shape[:3]  # Store for potential use
+                self.data_mask = self._prepare_mask(data_mask, self.grid_shape, flatten=True)
+                self.val_mask = self._prepare_mask(val_mask, self.grid_shape, flatten=True)
+                self.test_mask = self._prepare_mask(test_mask, self.grid_shape, flatten=True)
             else:
                 self.Xu = X_u.to(self.device)  # [Nu, 3]
                 self.uv = uv.to(self.device)   # [Nu, 2]
+                self.data_mask = self._prepare_mask(data_mask, X_u.shape[:1], flatten=True)
+                self.val_mask = self._prepare_mask(val_mask, X_u.shape[:1], flatten=True)
+                self.test_mask = self._prepare_mask(test_mask, X_u.shape[:1], flatten=True)
 
         # Physics points + targets (always flattened)
         self.Xph = X_ph.to(self.device)  # [Nph, 3]
@@ -108,6 +123,23 @@ class PhysicsInformedNN(nn.Module):
             self.double()
 
     # ----------------------- core ops -----------------------
+    def _prepare_mask(self, mask: torch.Tensor, expected_shape: Tuple[int, ...], flatten: bool = False) -> torch.Tensor:
+        if mask is None:
+            return None
+        mask = mask.to(self.device, dtype=torch.bool)
+        if tuple(mask.shape) != tuple(expected_shape):
+            raise ValueError(f"Mask shape {tuple(mask.shape)} does not match expected shape {tuple(expected_shape)}")
+        if flatten:
+            mask = mask.reshape(-1)
+        return mask
+
+    def _masked_mse(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        if mask is None:
+            return self.mse(pred, target)
+        if mask.sum() == 0:
+            return torch.zeros((), dtype=pred.dtype, device=pred.device)
+        return self.mse(pred[mask], target[mask])
+
     def _norm(self, X: torch.Tensor) -> torch.Tensor:
         """Affine map inputs to [-1,1] per-dimension (stable for MLP).
         Note: Derivatives w.r.t. original X are handled by autograd (chain rule).
@@ -224,8 +256,8 @@ class PhysicsInformedNN(nn.Module):
             X_grid = self.Xu
             uv_grid = self.forward_uv(X_grid)
             
-            # Data loss from grid
-            L_data = self.mse(uv_grid, self.uv)
+            # Data loss from observed training grid points only when a mask is provided.
+            L_data = self._masked_mse(uv_grid, self.uv, self.data_mask)
             
             # Physics loss: compute gradients on full grid, then sample
             u_x_grid, u_y_grid, v_x_grid, v_y_grid = self.grads_xy(X_grid)
@@ -241,9 +273,9 @@ class PhysicsInformedNN(nn.Module):
             L_vy = self.mse(v_y, self.vy_t)
         else:
             # Original approach for MLP or when no grid available
-            # Data loss (IC+BC)
+            # Data loss
             uv_pred = self.forward_uv(self.Xu)
-            L_data = self.mse(uv_pred, self.uv)
+            L_data = self._masked_mse(uv_pred, self.uv, self.data_mask)
 
             # Physics loss: full batch
             u_x, u_y, v_x, v_y = self.grads_xy(self.Xph)
@@ -264,6 +296,25 @@ class PhysicsInformedNN(nn.Module):
         }
         return L_tot, scalars
 
+    @torch.no_grad()
+    def data_split_losses(self) -> Dict[str, float]:
+        """Evaluate supervised data MSE for train/val/test masks."""
+        uv_pred = self.forward_uv(self.Xu)
+        losses = {}
+        split_masks = {
+            "train_data": self.data_mask,
+            "val_data": self.val_mask,
+            "test_data": self.test_mask,
+        }
+        for name, mask in split_masks.items():
+            if mask is None:
+                losses[name] = float(self.mse(uv_pred, self.uv).detach().cpu())
+            elif mask.sum() > 0:
+                losses[name] = float(self.mse(uv_pred[mask], self.uv[mask]).detach().cpu())
+            else:
+                losses[name] = float("nan")
+        return losses
+
     # ----------------------- training ---------------------
     def _log(self, scalars: Dict[str, float], total: float, log_every: int) -> None:
         self._iter_count += 1
@@ -271,6 +322,8 @@ class PhysicsInformedNN(nn.Module):
             self.loss_hist["total"].append(total)
             for k, v in scalars.items():
                 self.loss_hist[k].append(v)
+            for k, v in self.data_split_losses().items():
+                self.loss_hist.setdefault(k, []).append(v)
 
     def train_adam(self, steps: int, lr: float, log_every: int = 10) -> None:
         opt = optim.Adam(self.parameters(), lr=lr)
@@ -366,4 +419,3 @@ class PhysicsInformedNN(nn.Module):
         # MLP path: direct prediction
         uv = self.forward_uv(Xs).detach().cpu().numpy()
         return uv
-
