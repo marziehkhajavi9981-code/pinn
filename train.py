@@ -27,6 +27,8 @@ from data.grids import (crop_stacks, make_space_time_grids,
 from pinn.pinn import PhysicsInformedNN
 from utils.vis import plot_losses, imshow3, plot_vorticity, quiver_field, ensure_dir
 
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 def r2(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-12) -> float:
     y_true = np.asarray(y_true, dtype=np.float64).ravel()

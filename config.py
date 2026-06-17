@@ -16,10 +16,10 @@ class TrainConfig:
 
     # Loss weights
     w_data: float = 2.0
-    w_div: float = 0.0
+    w_div: float = 2.0
     w_vort: float = 1.0
-    w_ux: float = 0.5
-    w_vy: float = 0.5
+    w_ux: float = 0
+    w_vy: float = 0
 
     # Physics sampling
     n_physics: int = 10000                      # number of interior physics points per epoch

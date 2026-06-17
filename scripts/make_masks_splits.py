@@ -533,7 +533,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--v", default="v_stack.npz", help="Path to v_stack.npz with key 'V'.")
     parser.add_argument("--crop_h", type=int, default=64)
     parser.add_argument("--crop_w", type=int, default=64)
-    parser.add_argument("--out", default="masks/splits_random_pixels_005_seed0.npz")
+    parser.add_argument("--out", default="masks/splits_random_pixels_005_seed0_time_block.npz")
     parser.add_argument("--html", default="", help="Optional HTML viewer path. Defaults to OUT with .html.")
     parser.add_argument("--max_preview_frames", type=int, default=80)
     parser.add_argument("--no_data_preview", action="store_true",
@@ -542,7 +542,7 @@ def parse_args() -> argparse.Namespace:
                         choices=["random_pixels", "moving_particles", "fixed_sensors", "regular_grid",
                                  "random_blocks", "center_block", "center_hole", "temporal_stride",
                                  "temporal_windows"])
-    parser.add_argument("--obs_fraction", type=float, default=0.05)
+    parser.add_argument("--obs_fraction", type=float, default=0.15)
     parser.add_argument("--block_h", type=int, default=8)
     parser.add_argument("--block_w", type=int, default=8)
     parser.add_argument("--split_strategy", default="time_block",

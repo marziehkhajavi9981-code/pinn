@@ -100,14 +100,7 @@ python train.py \
 Use a generated `.npz` mask file:
 
 ```bash
-python train.py \
-  --u u_stack.npz \
-  --v v_stack.npz \
-  --crop_h 64 \
-  --crop_w 64 \
-  --model_type conv2d \
-  --device cpu \
-  --mask_npz masks/splits_random_pixels_005_seed0.npz
+python train.py --u u_stack.npz --v v_stack.npz --crop_h 64 --crop_w 64 --model_type conv2d --device cpu --mask_npz masks/splits_random_pixels_005_seed0.npz
 ```
 
 The training data loss uses `train_mask`. Validation and test data losses are
