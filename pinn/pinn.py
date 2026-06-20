@@ -1,4 +1,4 @@
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -267,7 +267,9 @@ class PhysicsInformedNN(nn.Module):
                 u_x_grid, u_y_grid, v_x_grid, v_y_grid, self.Xph, X_grid
             )
             
-            L_div = self.mse(u_x + v_y, torch.zeros_like(u_x))
+            div_model = u_x + v_y
+            div_actual = self.ux_t + self.vy_t
+            L_div = self.mse(div_model, div_actual)
             L_vort = self.mse(v_x - u_y, self.vx_t - self.uy_t)
             L_ux = self.mse(u_x, self.ux_t)
             L_vy = self.mse(v_y, self.vy_t)
@@ -279,7 +281,9 @@ class PhysicsInformedNN(nn.Module):
 
             # Physics loss: full batch
             u_x, u_y, v_x, v_y = self.grads_xy(self.Xph)
-            L_div = self.mse(u_x + v_y, torch.zeros_like(u_x))
+            div_model = u_x + v_y
+            div_actual = self.ux_t + self.vy_t
+            L_div = self.mse(div_model, div_actual)
             L_vort = self.mse(v_x - u_y, self.vx_t - self.uy_t)
             L_ux = self.mse(u_x, self.ux_t)
             L_vy = self.mse(v_y, self.vy_t)
@@ -393,28 +397,36 @@ class PhysicsInformedNN(nn.Module):
 
     # ----------------------- inference -------------------
     @torch.no_grad()
-    def predict(self, X_star: np.ndarray) -> np.ndarray:
+    def predict(self, X_star: np.ndarray, grid_shape: Optional[Tuple[int, int]] = None) -> np.ndarray:
         """Predict velocities at given points.
         
         Args:
             X_star: [N, 3] array of (x, y, t) coordinates (assumes single time slice)
+            grid_shape: optional (h, w) for conv inference on a grid that differs
+                from the training resolution
         
         Returns:
             [N, 2] array of (u, v) predictions
         """
         Xs = torch.as_tensor(X_star, dtype=torch.float64 if self.use_double else torch.float32, device=self.device)
         
-        # For Conv models, reshape to grid format if grid_shape matches
+        # For Conv models, reshape to grid format. They can run fully convolutionally
+        # on a different spatial resolution at inference time.
         if self.model_type in ["conv2d", "conv3d"] and self.grid_shape is not None:
-            _, h_grid, w_grid = self.grid_shape
             n_points = X_star.shape[0]
-            
-            if n_points == h_grid * w_grid:
-                # Reshape to grid format [1, h, w, 3]
-                Xs_grid = Xs.reshape(1, h_grid, w_grid, 3)
-                uv = self.forward_uv(Xs_grid).detach().cpu().numpy()
-                # Flatten back to [N, 2]
-                return uv.reshape(-1, 2)
+            if grid_shape is None:
+                _, h_grid, w_grid = self.grid_shape
+                grid_shape = (h_grid, w_grid)
+            h_grid, w_grid = grid_shape
+
+            if n_points != h_grid * w_grid:
+                raise ValueError(
+                    f"Conv prediction expected {h_grid * w_grid} points for grid_shape={grid_shape}, "
+                    f"got {n_points}"
+                )
+            Xs_grid = Xs.reshape(1, h_grid, w_grid, 3)
+            uv = self.forward_uv(Xs_grid).detach().cpu().numpy()
+            return uv.reshape(-1, 2)
         
         # MLP path: direct prediction
         uv = self.forward_uv(Xs).detach().cpu().numpy()

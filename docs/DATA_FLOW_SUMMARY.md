@@ -51,7 +51,7 @@ Stored: self.Xu  = [2560, 3]  (x, y, t coordinates)
    Output: 4 gradient tensors [1000, 1] each
    
    Physics losses:
-     - L_div  = MSE(u_x + v_y, 0)           # Divergence-free
+     - L_div  = MSE(u_x + v_y, Ux + Vy)     # Match actual divergence
      - L_vort = MSE(v_x - u_y, target)      # Vorticity
      - L_ux   = MSE(u_x, target)            # Gradient matching
      - L_vy   = MSE(v_y, target)

@@ -86,7 +86,9 @@ def quiver_field(U: np.ndarray, V: np.ndarray, step: int = 4, title: str = "velo
     yy, xx = np.mgrid[0:h:step, 0:w:step]
     plt.figure(figsize=(6, 6))
     plt.quiver(xx, yy, U[::step, ::step], V[::step, ::step])
-    plt.gca().invert_yaxis()
+    plt.xlim(-0.5, w - 0.5)
+    plt.ylim(-0.5, h - 0.5)
+    plt.gca().set_aspect("equal", adjustable="box")
     plt.title(title)
     plt.tight_layout()
     if fname:

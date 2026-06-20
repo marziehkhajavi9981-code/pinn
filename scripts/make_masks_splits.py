@@ -11,163 +11,33 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import math
 from pathlib import Path
-import sys
 from typing import Dict, Tuple
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from data.grids import crop_stacks  # noqa: E402
-
-
 MaskDict = Dict[str, np.ndarray]
 
 
-def _load_cropped_stacks(u_path: str, v_path: str, crop_h: int, crop_w: int) -> Tuple[np.ndarray, np.ndarray]:
+def _load_stacks(u_path: str, v_path: str) -> Tuple[np.ndarray, np.ndarray]:
     u_data = np.load(u_path)
     v_data = np.load(v_path)
-    U = u_data["U"]
-    V = v_data["V"]
-    Uc, Vc = crop_stacks(U, V, crop_h, crop_w)
-    return Uc, Vc
-
-
-def _target_count(fraction: float, h: int, w: int) -> int:
-    return max(1, min(h * w, int(round(float(fraction) * h * w))))
+    U = u_data["U"].astype(np.float32)
+    V = v_data["V"].astype(np.float32)
+    if U.shape != V.shape:
+        raise ValueError(f"U shape {U.shape} does not match V shape {V.shape}")
+    if U.ndim != 3:
+        raise ValueError(f"Expected U and V to have shape [N, H, W], got {U.shape}")
+    return U, V
 
 
 def random_pixels(shape: Tuple[int, int, int], obs_fraction: float, rng: np.random.Generator) -> np.ndarray:
     return rng.random(shape) < obs_fraction
 
 
-def moving_particles(shape: Tuple[int, int, int], obs_fraction: float, rng: np.random.Generator) -> np.ndarray:
-    N, h, w = shape
-    n_obs = _target_count(obs_fraction, h, w)
-    mask = np.zeros(shape, dtype=bool)
-    for k in range(N):
-        flat_idx = rng.choice(h * w, size=n_obs, replace=False)
-        mask[k].reshape(-1)[flat_idx] = True
-    return mask
-
-
-def fixed_sensors(shape: Tuple[int, int, int], obs_fraction: float, rng: np.random.Generator) -> np.ndarray:
-    N, h, w = shape
-    n_obs = _target_count(obs_fraction, h, w)
-    flat_idx = rng.choice(h * w, size=n_obs, replace=False)
-    frame = np.zeros((h, w), dtype=bool)
-    frame.reshape(-1)[flat_idx] = True
-    return np.broadcast_to(frame, (N, h, w)).copy()
-
-
-def regular_grid(shape: Tuple[int, int, int], obs_fraction: float, rng: np.random.Generator) -> np.ndarray:
-    N, h, w = shape
-    step = max(1, int(round(math.sqrt(1.0 / max(obs_fraction, 1e-12)))))
-    y0 = int(rng.integers(0, min(step, h)))
-    x0 = int(rng.integers(0, min(step, w)))
-    frame = np.zeros((h, w), dtype=bool)
-    frame[y0::step, x0::step] = True
-    return np.broadcast_to(frame, (N, h, w)).copy()
-
-
-def random_blocks(
-    shape: Tuple[int, int, int],
-    obs_fraction: float,
-    rng: np.random.Generator,
-    block_h: int,
-    block_w: int,
-) -> np.ndarray:
-    N, h, w = shape
-    mask = np.zeros(shape, dtype=bool)
-    target = _target_count(obs_fraction, h, w)
-    block_h = max(1, min(block_h, h))
-    block_w = max(1, min(block_w, w))
-    max_blocks = max(1, math.ceil((target * 3) / (block_h * block_w)))
-    for k in range(N):
-        attempts = 0
-        while int(mask[k].sum()) < target and attempts < max_blocks * 20:
-            y0 = int(rng.integers(0, h - block_h + 1))
-            x0 = int(rng.integers(0, w - block_w + 1))
-            mask[k, y0 : y0 + block_h, x0 : x0 + block_w] = True
-            attempts += 1
-        if int(mask[k].sum()) > target:
-            observed = np.flatnonzero(mask[k].reshape(-1))
-            drop = rng.choice(observed, size=int(mask[k].sum()) - target, replace=False)
-            mask[k].reshape(-1)[drop] = False
-    return mask
-
-
-def center_block(shape: Tuple[int, int, int], obs_fraction: float) -> np.ndarray:
-    N, h, w = shape
-    side_scale = math.sqrt(max(0.0, min(obs_fraction, 1.0)))
-    bh = max(1, int(round(h * side_scale)))
-    bw = max(1, int(round(w * side_scale)))
-    y0 = (h - bh) // 2
-    x0 = (w - bw) // 2
-    frame = np.zeros((h, w), dtype=bool)
-    frame[y0 : y0 + bh, x0 : x0 + bw] = True
-    return np.broadcast_to(frame, (N, h, w)).copy()
-
-
-def center_hole(shape: Tuple[int, int, int], obs_fraction: float) -> np.ndarray:
-    N, h, w = shape
-    missing_fraction = max(0.0, min(1.0, 1.0 - obs_fraction))
-    side_scale = math.sqrt(missing_fraction)
-    bh = int(round(h * side_scale))
-    bw = int(round(w * side_scale))
-    frame = np.ones((h, w), dtype=bool)
-    if bh > 0 and bw > 0:
-        y0 = (h - bh) // 2
-        x0 = (w - bw) // 2
-        frame[y0 : y0 + bh, x0 : x0 + bw] = False
-    return np.broadcast_to(frame, (N, h, w)).copy()
-
-
-def temporal_stride(shape: Tuple[int, int, int], obs_fraction: float) -> np.ndarray:
-    N, h, w = shape
-    stride = max(1, int(round(1.0 / max(obs_fraction, 1e-12))))
-    mask = np.zeros(shape, dtype=bool)
-    mask[::stride, :, :] = True
-    return mask
-
-
-def temporal_windows(shape: Tuple[int, int, int], obs_fraction: float) -> np.ndarray:
-    N, h, w = shape
-    n_frames = max(1, min(N, int(round(obs_fraction * N))))
-    start = max(0, (N - n_frames) // 2)
-    mask = np.zeros(shape, dtype=bool)
-    mask[start : start + n_frames, :, :] = True
-    return mask
-
-
 def make_observation_mask(args: argparse.Namespace, shape: Tuple[int, int, int]) -> np.ndarray:
     rng = np.random.default_rng(args.seed)
-    model = args.mask_model
-    if model == "random_pixels":
-        mask = random_pixels(shape, args.obs_fraction, rng)
-    elif model == "moving_particles":
-        mask = moving_particles(shape, args.obs_fraction, rng)
-    elif model == "fixed_sensors":
-        mask = fixed_sensors(shape, args.obs_fraction, rng)
-    elif model == "regular_grid":
-        mask = regular_grid(shape, args.obs_fraction, rng)
-    elif model == "random_blocks":
-        mask = random_blocks(shape, args.obs_fraction, rng, args.block_h, args.block_w)
-    elif model == "center_block":
-        mask = center_block(shape, args.obs_fraction)
-    elif model == "center_hole":
-        mask = center_hole(shape, args.obs_fraction)
-    elif model == "temporal_stride":
-        mask = temporal_stride(shape, args.obs_fraction)
-    elif model == "temporal_windows":
-        mask = temporal_windows(shape, args.obs_fraction)
-    else:
-        raise ValueError(f"Unknown mask model: {model}")
-    return mask.astype(bool)
+    return random_pixels(shape, args.obs_fraction, rng).astype(bool)
 
 
 def _split_counts(fractions: Tuple[float, float, float], n_items: int) -> Tuple[int, int]:
@@ -179,7 +49,7 @@ def _split_counts(fractions: Tuple[float, float, float], n_items: int) -> Tuple[
     return train_end, val_end
 
 
-def split_random_observed(obs_mask: np.ndarray, fractions: Tuple[float, float, float], rng: np.random.Generator) -> MaskDict:
+def split_random_pixels(obs_mask: np.ndarray, fractions: Tuple[float, float, float], rng: np.random.Generator) -> MaskDict:
     flat_obs = np.flatnonzero(obs_mask.reshape(-1))
     rng.shuffle(flat_obs)
     train_end, val_end = _split_counts(fractions, len(flat_obs))
@@ -202,30 +72,21 @@ def split_time_block(obs_mask: np.ndarray, fractions: Tuple[float, float, float]
     return {"train_mask": train, "val_mask": val, "test_mask": test}
 
 
-def split_spatial_block(obs_mask: np.ndarray, fractions: Tuple[float, float, float]) -> MaskDict:
-    _, _, w = obs_mask.shape
-    train_end, val_end = _split_counts(fractions, w)
+def split_time_random(
+    obs_mask: np.ndarray,
+    fractions: Tuple[float, float, float],
+    rng: np.random.Generator,
+) -> MaskDict:
+    N = obs_mask.shape[0]
+    frame_idx = np.arange(N)
+    rng.shuffle(frame_idx)
+    train_end, val_end = _split_counts(fractions, N)
     train = np.zeros_like(obs_mask, dtype=bool)
     val = np.zeros_like(obs_mask, dtype=bool)
     test = np.zeros_like(obs_mask, dtype=bool)
-    train[:, :, :train_end] = obs_mask[:, :, :train_end]
-    val[:, :, train_end:val_end] = obs_mask[:, :, train_end:val_end]
-    test[:, :, val_end:] = obs_mask[:, :, val_end:]
-    return {"train_mask": train, "val_mask": val, "test_mask": test}
-
-
-def split_spatiotemporal_block(obs_mask: np.ndarray, fractions: Tuple[float, float, float]) -> MaskDict:
-    N, _, w = obs_mask.shape
-    t_train_end, t_val_end = _split_counts(fractions, N)
-    x_train_end, x_val_end = _split_counts(fractions, w)
-    train = np.zeros_like(obs_mask, dtype=bool)
-    val = np.zeros_like(obs_mask, dtype=bool)
-    test = np.zeros_like(obs_mask, dtype=bool)
-    train[:t_train_end, :, :x_train_end] = obs_mask[:t_train_end, :, :x_train_end]
-    val[t_train_end:t_val_end, :, x_train_end:x_val_end] = obs_mask[
-        t_train_end:t_val_end, :, x_train_end:x_val_end
-    ]
-    test[t_val_end:, :, x_val_end:] = obs_mask[t_val_end:, :, x_val_end:]
+    train[frame_idx[:train_end]] = obs_mask[frame_idx[:train_end]]
+    val[frame_idx[train_end:val_end]] = obs_mask[frame_idx[train_end:val_end]]
+    test[frame_idx[val_end:]] = obs_mask[frame_idx[val_end:]]
     return {"train_mask": train, "val_mask": val, "test_mask": test}
 
 
@@ -236,14 +97,12 @@ def make_splits(args: argparse.Namespace, obs_mask: np.ndarray) -> MaskDict:
         fractions = tuple(v / total for v in fractions)
     rng = np.random.default_rng(args.seed + 17)
     strategy = args.split_strategy
-    if strategy == "random_observed":
-        return split_random_observed(obs_mask, fractions, rng)
+    if strategy == "random_pixels":
+        return split_random_pixels(obs_mask, fractions, rng)
     if strategy == "time_block":
         return split_time_block(obs_mask, fractions)
-    if strategy == "spatial_block":
-        return split_spatial_block(obs_mask, fractions)
-    if strategy == "spatiotemporal_block":
-        return split_spatiotemporal_block(obs_mask, fractions)
+    if strategy == "time_random":
+        return split_time_random(obs_mask, fractions, rng)
     raise ValueError(f"Unknown split strategy: {strategy}")
 
 
@@ -487,6 +346,7 @@ function draw() {{
   canvas.width = payload.w * scale;
   canvas.height = payload.h * scale;
   for (let y = 0; y < payload.h; y++) {{
+    const drawY = (payload.h - 1 - y) * scale;
     const maskRow = frame.rows[y];
     const dataRow = frame.data ? frame.data[baseView]?.[y] : null;
     for (let x = 0; x < payload.w; x++) {{
@@ -496,13 +356,13 @@ function draw() {{
         const q = hexByte(dataRow, x);
         ctx.fillStyle = baseView === "speed" ? speedColor(q) : signedColor(q);
       }}
-      ctx.fillRect(x * scale, y * scale, scale, scale);
+      ctx.fillRect(x * scale, drawY, scale, scale);
       if (view.endsWith("-mask")) {{
         const stroke = maskStroke(maskRow[x]);
         if (stroke) {{
           ctx.strokeStyle = stroke;
           ctx.lineWidth = Math.max(1, Math.floor(scale / 4));
-          ctx.strokeRect(x * scale + 0.5, y * scale + 0.5, scale - 1, scale - 1);
+          ctx.strokeRect(x * scale + 0.5, drawY + 0.5, scale - 1, scale - 1);
         }}
       }}
     }}
@@ -531,22 +391,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create sparse observation masks and train/val/test splits.")
     parser.add_argument("--u", default="u_stack.npz", help="Path to u_stack.npz with key 'U'.")
     parser.add_argument("--v", default="v_stack.npz", help="Path to v_stack.npz with key 'V'.")
-    parser.add_argument("--crop_h", type=int, default=64)
-    parser.add_argument("--crop_w", type=int, default=64)
     parser.add_argument("--out", default="masks/splits_random_pixels_005_seed0_time_block.npz")
     parser.add_argument("--html", default="", help="Optional HTML viewer path. Defaults to OUT with .html.")
     parser.add_argument("--max_preview_frames", type=int, default=80)
     parser.add_argument("--no_data_preview", action="store_true",
                         help="Do not embed quantized U/V/speed previews in the HTML viewer.")
-    parser.add_argument("--mask_model", default="random_pixels",
-                        choices=["random_pixels", "moving_particles", "fixed_sensors", "regular_grid",
-                                 "random_blocks", "center_block", "center_hole", "temporal_stride",
-                                 "temporal_windows"])
+    parser.add_argument("--mask_model", default="random_pixels", choices=["random_pixels"],
+                        help="Observation mask model. Only independent random pixels are supported.")
     parser.add_argument("--obs_fraction", type=float, default=0.15)
-    parser.add_argument("--block_h", type=int, default=8)
-    parser.add_argument("--block_w", type=int, default=8)
     parser.add_argument("--split_strategy", default="time_block",
-                        choices=["time_block", "random_observed", "spatial_block", "spatiotemporal_block"])
+                        choices=["time_block", "time_random", "random_pixels"])
     parser.add_argument("--train_fraction", type=float, default=0.70)
     parser.add_argument("--val_fraction", type=float, default=0.15)
     parser.add_argument("--test_fraction", type=float, default=0.15)
@@ -559,8 +413,8 @@ def main() -> None:
     args = parse_args()
     if not args.html:
         args.html = str(Path(args.out).with_suffix(".html"))
-    Uc, Vc = _load_cropped_stacks(args.u, args.v, args.crop_h, args.crop_w)
-    shape = tuple(int(v) for v in Uc.shape)
+    U, V = _load_stacks(args.u, args.v)
+    shape = tuple(int(v) for v in U.shape)
     obs_mask = make_observation_mask(args, shape)
     split_masks = make_splits(args, obs_mask)
     physics_mask = make_physics_mask(shape, obs_mask, args.physics_mask)
@@ -568,8 +422,6 @@ def main() -> None:
     meta = {
         "u": args.u,
         "v": args.v,
-        "crop_h": args.crop_h,
-        "crop_w": args.crop_w,
         "shape": shape,
         "mask_model": args.mask_model,
         "obs_fraction": args.obs_fraction,
@@ -582,7 +434,7 @@ def main() -> None:
         "summaries": {name: summarize(mask) for name, mask in masks.items()},
     }
     write_npz(args, shape, masks, meta)
-    write_html_viewer(args, masks, Uc, Vc, meta)
+    write_html_viewer(args, masks, U, V, meta)
     print(json.dumps({"out": args.out, "html": args.html, "summaries": meta["summaries"]}, indent=2))
 
 

@@ -6,7 +6,7 @@
 
 Usage:
     python train.py --u u_stack.npz --v v_stack.npz \
-                    --crop_h 64 --crop_w 64 --device cuda
+                    --device cuda
 
 This will:
   1) Load U,V stacks and build IC/BC + physics samples
@@ -22,8 +22,8 @@ import torch
 from tqdm import tqdm
 
 from config import TrainConfig
-from data.grids import (crop_stacks, make_space_time_grids,
-                        boundary_condition_samples, finite_differences, random_physics_samples)
+from data.grids import (make_space_time_grids, boundary_condition_samples,
+                        finite_differences, random_physics_samples)
 from pinn.pinn import PhysicsInformedNN
 from utils.vis import plot_losses, imshow3, plot_vorticity, quiver_field, ensure_dir
 
@@ -50,7 +50,8 @@ def masked_mse(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> floa
     return mse(y_true[mask], y_pred[mask])
 
 
-def load_split_masks(mask_npz: str, expected_shape: Tuple[int, int, int], stride: int) -> Optional[Dict[str, np.ndarray]]:
+def load_split_masks(mask_npz: str, expected_shape: Tuple[int, int, int],
+                     time_stride: int, spatial_downsample: int = 1) -> Optional[Dict[str, np.ndarray]]:
     if not mask_npz:
         return None
     data = np.load(mask_npz, allow_pickle=False)
@@ -61,9 +62,12 @@ def load_split_masks(mask_npz: str, expected_shape: Tuple[int, int, int], stride
     masks = {k: data[k].astype(bool) for k in required}
     for name, mask in masks.items():
         if mask.shape != expected_shape:
-            raise ValueError(f"{name} shape {mask.shape} does not match cropped data shape {expected_shape}")
-    if stride > 1:
-        masks = {k: v[::stride].copy() for k, v in masks.items()}
+            raise ValueError(f"{name} shape {mask.shape} does not match data shape {expected_shape}")
+    if time_stride > 1 or spatial_downsample > 1:
+        masks = {
+            k: v[::time_stride, ::spatial_downsample, ::spatial_downsample].copy()
+            for k, v in masks.items()
+        }
     return masks
 
 
@@ -76,13 +80,13 @@ def choose_eval_frame(test_mask: Optional[np.ndarray], fallback: int, stride: in
 
 
 def all_point_samples(Xg: np.ndarray, Yg: np.ndarray, t: np.ndarray,
-                      Uc: np.ndarray, Vc: np.ndarray, stride: int = 1) -> Tuple[np.ndarray, np.ndarray]:
-    """Build supervision from every (x,y,t) lattice point in the cropped stacks.
+                      U: np.ndarray, V: np.ndarray, stride: int = 1) -> Tuple[np.ndarray, np.ndarray]:
+    """Build supervision from every (x,y,t) lattice point in the velocity stacks.
     
     Args:
         Xg, Yg: meshgrids [h, w]
         t: time array [N]
-        Uc, Vc: velocity stacks [N, h, w]
+        U, V: velocity stacks [N, h, w]
         stride: sample every stride-th timestep (default=1 for all frames)
     
     Returns:
@@ -91,10 +95,10 @@ def all_point_samples(Xg: np.ndarray, Yg: np.ndarray, t: np.ndarray,
     """
     # Apply stride to temporal dimension
     t_sampled = t[::stride]
-    Uc_sampled = Uc[::stride]
-    Vc_sampled = Vc[::stride]
+    U_sampled = U[::stride]
+    V_sampled = V[::stride]
     
-    N_sampled, h, w = Uc_sampled.shape
+    N_sampled, h, w = U_sampled.shape
     
     # Build spatial coordinates [h, w, 2]
     xy = np.stack([Xg, Yg], axis=-1).astype(np.float32)  # [h, w, 2]
@@ -110,7 +114,7 @@ def all_point_samples(Xg: np.ndarray, Yg: np.ndarray, t: np.ndarray,
     X_all = np.concatenate([xy_full, t_full], axis=-1)
     
     # Stack velocities to get [N', h, w, 2]
-    uv_all = np.stack([Uc_sampled, Vc_sampled], axis=-1).astype(np.float32)
+    uv_all = np.stack([U_sampled, V_sampled], axis=-1).astype(np.float32)
     
     return X_all, uv_all
 
@@ -122,6 +126,7 @@ def main(args: argparse.Namespace) -> None:
     if args.hidden: cfg.hidden = tuple(map(int, args.hidden.split(',')))
     if args.double is not None: cfg.use_double_precision = bool(args.double)
     if args.save_dir: cfg.save_dir = args.save_dir
+    if args.spatial_downsample is not None: cfg.spatial_downsample = args.spatial_downsample
     if args.time_stride is not None: cfg.time_stride = args.time_stride
     if args.model_type is not None: cfg.model_type = args.model_type.lower()
     if args.conv_channels: cfg.conv_channels = tuple(map(int, args.conv_channels.split(',')))
@@ -130,6 +135,10 @@ def main(args: argparse.Namespace) -> None:
     if args.adam_steps is not None: cfg.adam_steps = args.adam_steps
     if args.lbfgs_maxiter is not None: cfg.lbfgs_maxiter = args.lbfgs_maxiter
     if args.log_every is not None: cfg.log_every = args.log_every
+    if cfg.spatial_downsample < 1:
+        raise ValueError("spatial_downsample must be >= 1")
+    if cfg.time_stride < 1:
+        raise ValueError("time_stride must be >= 1")
 
     ensure_dir(cfg.save_dir)
 
@@ -141,19 +150,38 @@ def main(args: argparse.Namespace) -> None:
     print("Loading data...")
     U = np.load(args.u)["U"].astype(np.float32)  # [N,H,W]
     V = np.load(args.v)["V"].astype(np.float32)
+    if U.shape != V.shape:
+        raise ValueError(f"U shape {U.shape} does not match V shape {V.shape}")
+    if U.ndim != 3:
+        raise ValueError(f"Expected U and V to have shape [N, H, W], got {U.shape}")
     N, H, W = U.shape
     print(f"✓ Loaded U,V with shape: {U.shape} {V.shape}")
-
-    print(f"Cropping to {args.crop_h}x{args.crop_w}...")
-    Uc, Vc = crop_stacks(U, V, args.crop_h, args.crop_w)
-    N, h, w = Uc.shape
-    print(f"✓ Cropped to: {Uc.shape}")
+    print(f"✓ Using full data shape: {U.shape}")
 
     # --------------- Coordinates ---------------
     print("Building coordinate grids...")
     dx = dy = dt = 1.0
-    x, y, t, Xg, Yg = make_space_time_grids(N, h, w, dx, dy, dt)
-    print(f"✓ Created grids: x={x.shape}, y={y.shape}, t={t.shape}")
+    x_full, y_full, t, Xg_full, Yg_full = make_space_time_grids(N, H, W, dx, dy, dt)
+    print(f"✓ Created full grids: x={x_full.shape}, y={y_full.shape}, t={t.shape}")
+
+    # --------------- Spatial downsampling for training ---------------
+    s = cfg.spatial_downsample
+    if s > 1:
+        U_train = U[:, ::s, ::s].copy()
+        V_train = V[:, ::s, ::s].copy()
+        x = x_full[::s].copy()
+        y = y_full[::s].copy()
+        Xg = Xg_full[::s, ::s].copy()
+        Yg = Yg_full[::s, ::s].copy()
+        print(f"✓ Training on spatially downsampled grid: {U_train.shape} (every {s}-th pixel)")
+    else:
+        U_train, V_train = U, V
+        x, y, Xg, Yg = x_full, y_full, Xg_full, Yg_full
+    _, h, w = U_train.shape
+    train_dx = dx * s
+    train_dy = dy * s
+    if min(h, w) < 3:
+        raise ValueError(f"spatial_downsample={s} leaves grid too small for finite differences: {(h, w)}")
 
     # --------------- Supervised samples ---------------
     if cfg.time_stride > 1:
@@ -162,11 +190,12 @@ def main(args: argparse.Namespace) -> None:
     else:
         print(f"Building supervised samples (all {N*h*w} spacetime points)...")
     
-    X_u, uv = all_point_samples(Xg, Yg, t, Uc, Vc, stride=cfg.time_stride)  # [N', h, w, 3], [N', h, w, 2]
+    X_u, uv = all_point_samples(Xg, Yg, t, U_train, V_train, stride=cfg.time_stride)  # [N', h, w, 3], [N', h, w, 2]
     print(f"✓ X_u shape: {X_u.shape}, uv shape: {uv.shape}")
     sampled_time_indices = np.arange(N, dtype=np.int32)[::cfg.time_stride]
 
-    split_masks = load_split_masks(cfg.mask_npz, (N, h, w), cfg.time_stride)
+    split_masks = load_split_masks(cfg.mask_npz, (N, H, W), cfg.time_stride, cfg.spatial_downsample)
+    eval_split_masks = load_split_masks(cfg.mask_npz, (N, H, W), cfg.time_stride, 1) if cfg.mask_npz else None
     if split_masks is not None:
         print(f"✓ Loaded split masks from {cfg.mask_npz}")
         print(f"  - train observed points: {int(split_masks['train_mask'].sum()):,}")
@@ -174,13 +203,13 @@ def main(args: argparse.Namespace) -> None:
         print(f"  - test observed points:  {int(split_masks['test_mask'].sum()):,}")
         for split_name in ("train_mask", "val_mask", "test_mask"):
             if int(split_masks[split_name].sum()) == 0:
-                print(f"  ! Warning: {split_name} has zero points after applying time_stride={cfg.time_stride}")
+                print(f"  ! Warning: {split_name} has zero points after applying time_stride={cfg.time_stride}, spatial_downsample={cfg.spatial_downsample}")
         if cfg.use_boundary_conditions:
             raise ValueError("Boundary condition append mode is not supported together with mask_npz yet.")
     
     if cfg.use_boundary_conditions:
         print("Adding boundary condition samples...")
-        X_bc, uv_bc = boundary_condition_samples(x, y, t, Uc, Vc)  # [M, 3], [M, 2]
+        X_bc, uv_bc = boundary_condition_samples(x, y, t, U_train, V_train)  # [M, 3], [M, 2]
         # Flatten all-points and append BC
         X_u = np.vstack([X_u.reshape(-1, 3), X_bc]).astype(np.float32)  # [N*h*w+M, 3]
         uv = np.vstack([uv.reshape(-1, 2), uv_bc]).astype(np.float32)   # [N*h*w+M, 2]
@@ -188,7 +217,7 @@ def main(args: argparse.Namespace) -> None:
 
     # --------------- Physics targets (FD) ---------------
     print(f"Computing finite differences and sampling {cfg.n_physics} physics points...")
-    Ux, Uy, Vx, Vy = finite_differences(Uc, Vc, dy=dy, dx=dx)  # each [N, h, w]
+    Ux, Uy, Vx, Vy = finite_differences(U_train, V_train, dy=train_dy, dx=train_dx)  # each [N, h, w]
     physics_time_indices = sampled_time_indices if cfg.model_type in ("conv2d", "conv3d") else None
     X_ph, ph_targets_np = random_physics_samples(
         x, y, t, Ux, Uy, Vx, Vy, cfg.n_physics, seed=0, time_indices=physics_time_indices
@@ -198,8 +227,8 @@ def main(args: argparse.Namespace) -> None:
         print(f"  - Conv physics sampled from {len(physics_time_indices)}/{N} strided frames")
 
     # --------------- Bounds for normalization ---------------
-    lb = np.array([x.min(), y.min(), t.min()], dtype=np.float32)
-    ub = np.array([x.max(), y.max(), t.max()], dtype=np.float32)
+    lb = np.array([x_full.min(), y_full.min(), t.min()], dtype=np.float32)
+    ub = np.array([x_full.max(), y_full.max(), t.max()], dtype=np.float32)
 
     # --------------- Torch tensors ---------------
     print("Converting to PyTorch tensors...")
@@ -269,23 +298,23 @@ def main(args: argparse.Namespace) -> None:
     # --------------- Evaluate on a frame ---------------
     print("Evaluating model on test frame...")
     fallback_frame = min(120, N - 1)
-    frame_eval = choose_eval_frame(split_masks["test_mask"] if split_masks else None, fallback_frame, cfg.time_stride)
+    frame_eval = choose_eval_frame(eval_split_masks["test_mask"] if eval_split_masks else None, fallback_frame, cfg.time_stride)
     frame_eval = min(frame_eval, N - 1)
-    X_star = np.stack([Xg.ravel(), Yg.ravel(), np.full(h * w, t[frame_eval], np.float32)], axis=1)
-    uv_pred = model.predict(X_star)
-    U_pred = uv_pred[:, 0].reshape(h, w)
-    V_pred = uv_pred[:, 1].reshape(h, w)
+    X_star = np.stack([Xg_full.ravel(), Yg_full.ravel(), np.full(H * W, t[frame_eval], np.float32)], axis=1)
+    uv_pred = model.predict(X_star, grid_shape=(H, W))
+    U_pred = uv_pred[:, 0].reshape(H, W)
+    V_pred = uv_pred[:, 1].reshape(H, W)
 
-    u_true = Uc[frame_eval]
-    v_true = Vc[frame_eval]
+    u_true = U[frame_eval]
+    v_true = V[frame_eval]
 
     print(f"\nEvaluation metrics (frame {frame_eval}):")
     print(f"  RelL2(u): {np.linalg.norm(u_true - U_pred) / (np.linalg.norm(u_true) + 1e-12):.3e}")
     print(f"  MSE(u)={mse(u_true, U_pred):.4e}, R2(u)={r2(u_true, U_pred):.4f}")
     print(f"  MSE(v)={mse(v_true, V_pred):.4e}, R2(v)={r2(v_true, V_pred):.4f}")
-    if split_masks is not None:
+    if eval_split_masks is not None:
         local_eval = frame_eval // cfg.time_stride
-        test_mask_frame = split_masks["test_mask"][local_eval] if local_eval < split_masks["test_mask"].shape[0] else None
+        test_mask_frame = eval_split_masks["test_mask"][local_eval] if local_eval < eval_split_masks["test_mask"].shape[0] else None
         print(f"  Test-mask MSE(u)={masked_mse(u_true, U_pred, test_mask_frame):.4e}")
         print(f"  Test-mask MSE(v)={masked_mse(v_true, V_pred, test_mask_frame):.4e}")
 
@@ -296,12 +325,12 @@ def main(args: argparse.Namespace) -> None:
     imshow3(v_true, V_pred, np.abs(v_true - V_pred), titles=("v true", "v pred", "|error|"),
             fname=os.path.join(cfg.save_dir, "v_triptych.png"))
     print("  ✓ u_triptych.png, v_triptych.png")
-    if split_masks is not None:
+    if eval_split_masks is not None:
         local_eval = frame_eval // cfg.time_stride
-        if local_eval < split_masks["test_mask"].shape[0]:
-            test_mask_vis = split_masks["test_mask"][local_eval]
+        if local_eval < eval_split_masks["test_mask"].shape[0]:
+            test_mask_vis = eval_split_masks["test_mask"][local_eval]
         else:
-            test_mask_vis = np.zeros((h, w), dtype=bool)
+            test_mask_vis = np.zeros((H, W), dtype=bool)
         imshow3(u_true, U_pred, test_mask_vis.astype(np.float32),
                 titles=("u true (unmasked)", "u pred", "test mask"),
                 fname=os.path.join(cfg.save_dir, "u_test_unmasked_triptych.png"))
@@ -333,8 +362,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a PINN for 2D velocity with kinematic constraints.")
     parser.add_argument("--u", type=str, required=True, help="Path to u_stack.npz with key 'U'")
     parser.add_argument("--v", type=str, required=True, help="Path to v_stack.npz with key 'V'")
-    parser.add_argument("--crop_h", type=int, default=64, help="Crop height")
-    parser.add_argument("--crop_w", type=int, default=64, help="Crop width")
     parser.add_argument("--device", type=str, default=None, help="cuda or cpu (overrides config)")
     parser.add_argument("--model_type", type=str, default=None, choices=["mlp", "conv2d", "conv3d"],
                         help="Model architecture: mlp (default), conv2d, or conv3d")
@@ -342,6 +369,8 @@ if __name__ == "__main__":
     parser.add_argument("--conv_channels", type=str, default=None, help="Comma-separated channels for Conv2D/Conv3D, e.g., 32,64,64,32")
     parser.add_argument("--double", type=int, default=None, help="1 to use float64, 0 for float32")
     parser.add_argument("--save_dir", type=str, default=None, help="Output directory for figures")
+    parser.add_argument("--spatial_downsample", type=int, default=None,
+                        help="Train on every N-th spatial pixel, while evaluating/inferencing on the full grid")
     parser.add_argument("--time_stride", type=int, default=None, help="Sample every N-th timestep (1=all frames, 2=every other, etc.)")
     parser.add_argument("--mask_npz", type=str, default=None, help="Optional masks/splits .npz generated by scripts/make_masks_splits.py")
     parser.add_argument("--n_physics", type=int, default=None, help="Number of sampled physics points")

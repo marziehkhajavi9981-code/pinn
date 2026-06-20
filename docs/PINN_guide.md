@@ -34,7 +34,7 @@ This guide explains the physical problem we are solving and how this codebase im
 - Files expected:
   - u_stack.npz with key `U` shaped [N, H, W]
   - v_stack.npz with key `V` shaped [N, H, W]
-- We crop the stacks to a working window and define uniform spacings dx = dy = dt = 1 for simplicity.
+- We use the complete stacks and define uniform spacings dx = dy = dt = 1 for simplicity.
 - We generate:
   - IC supervised samples: coordinates and velocities for the initial time slice.
   - BC (Boundary Conditions): **no-slip walls** where u = 0, v = 0 (physical constraint, not data fitting).
@@ -47,12 +47,10 @@ Key entry-point:
     U = np.load(args.u)["U"].astype(np.float32)  # [N,H,W]
     V = np.load(args.v)["V"].astype(np.float32)
     ...
-    Uc, Vc = crop_stacks(U, V, args.crop_h, args.crop_w)
+    X_ic, uv_ic = initial_condition_samples(Xg, Yg, U[0], V[0])
+    X_bc, uv_bc = boundary_condition_samples(x, y, t, U, V)
     ...
-    X_ic, uv_ic = initial_condition_samples(Xg, Yg, Uc[0], Vc[0])
-    X_bc, uv_bc = boundary_condition_samples(x, y, t, Uc, Vc)
-    ...
-    Ux, Uy, Vx, Vy = finite_differences(Uc, Vc, dy=dy, dx=dx)
+    Ux, Uy, Vx, Vy = finite_differences(U, V, dy=dy, dx=dx)
     X_ph, ph_targets_np = random_physics_samples(x, y, t, Ux, Uy, Vx, Vy, cfg.n_physics, seed=0)
 ```
 
@@ -60,7 +58,7 @@ Helpers (sampling, FD):
 
 ```48:90:/home/fardin/pinn/data/grids.py
 def boundary_condition_samples(x: np.ndarray, y: np.ndarray, t: np.ndarray,
-                               Uc: np.ndarray, Vc: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+                               U: np.ndarray, V: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     ...
 def finite_differences(U: np.ndarray, V: np.ndarray, dy: float, dx: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     ...
@@ -112,7 +110,7 @@ class MLP(nn.Module):
   - IC: MSE between predicted and true velocities at initial time (t=0)
   - BC: MSE enforcing u=0, v=0 at boundaries (no-slip walls)
 - Physics losses (interior):
-  - **Divergence: MSE(u_x + v_y, 0)** — enforces incompressibility ∇·v = 0
+  - **Divergence: MSE((u_x + v_y)_model, (Ux + Vy)_actual)** — matches the finite-difference divergence from data
   - Vorticity: MSE(v_x − u_y, Vx − Uy) — matches vorticity from data (optional regularization)
   - Direct derivative matches: MSE(u_x, Ux) and MSE(v_y, Vy) — smoothness regularization
 - Weighted sum with configuration weights.
@@ -232,13 +230,12 @@ class TrainConfig:
 ### Running
 
 ```bash
-python train.py --u u_stack.npz --v v_stack.npz --crop_h 64 --crop_w 64 --device cuda
+python train.py --u u_stack.npz --v v_stack.npz --device cuda
 ```
 
 CLI notes:
 - If `--device` is omitted, the config’s default is used.
 - Use `--double 1` to force float64 if needed.
-- Adjust `--crop_h` and `--crop_w` to focus training on a subregion.
 
 ### Outputs
 - Loss curves saved to `save_dir` (default `outputs`).
@@ -283,7 +280,7 @@ CLI notes:
 ## Glossary
 - IC (Initial Condition): data at the first time frame (t = t0).
 - BC (Boundary Condition): data along the spatial domain boundaries.
-- Divergence: ∂u/∂x + ∂v/∂y, zero for incompressible flow.
+- Divergence: ∂u/∂x + ∂v/∂y. The implemented loss matches model divergence to finite-difference divergence from data.
 - Vorticity (2D): ∂v/∂x − ∂u/∂y, scalar measure of local rotation.
 - PINN: Physics-Informed Neural Network, a model trained using data and physics constraints.
 

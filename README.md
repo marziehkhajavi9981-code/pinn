@@ -7,14 +7,13 @@ reconstruction from `u_stack.npz` and `v_stack.npz`.
 
 ### Generate Masks And Splits
 
-Create a sparse observation mask plus train/val/test split artifact:
+Create a sparse independent-random-pixel observation mask plus train/val/test
+split artifact:
 
 ```bash
 python scripts/make_masks_splits.py \
   --u u_stack.npz \
   --v v_stack.npz \
-  --crop_h 64 \
-  --crop_w 64 \
   --mask_model random_pixels \
   --obs_fraction 0.05 \
   --split_strategy time_block \
@@ -27,43 +26,18 @@ This also writes an interactive HTML viewer next to the `.npz` file:
 masks/splits_random_pixels_005_seed0.html
 ```
 
-Useful mask models:
+The only supported observation mask model is:
 
 ```text
 random_pixels
-moving_particles
-fixed_sensors
-regular_grid
-random_blocks
-center_block
-center_hole
-temporal_stride
-temporal_windows
 ```
 
-Useful split strategies:
+Supported split strategies:
 
 ```text
 time_block
-random_observed
-spatial_block
-spatiotemporal_block
-```
-
-For block-style sparse observations:
-
-```bash
-python scripts/make_masks_splits.py \
-  --u u_stack.npz \
-  --v v_stack.npz \
-  --crop_h 64 \
-  --crop_w 64 \
-  --mask_model random_blocks \
-  --obs_fraction 0.05 \
-  --block_h 8 \
-  --block_w 8 \
-  --split_strategy time_block \
-  --out masks/splits_random_blocks_005_seed0.npz
+time_random
+random_pixels
 ```
 
 To make a smaller HTML file without embedded velocity previews:
@@ -72,11 +46,9 @@ To make a smaller HTML file without embedded velocity previews:
 python scripts/make_masks_splits.py \
   --u u_stack.npz \
   --v v_stack.npz \
-  --crop_h 64 \
-  --crop_w 64 \
   --mask_model random_pixels \
   --obs_fraction 0.05 \
-  --split_strategy time_block \
+  --split_strategy time_random \
   --out masks/splits_random_pixels_005_seed0.npz \
   --no_data_preview
 ```
@@ -89,8 +61,6 @@ Run the original dense-supervision workflow:
 python train.py \
   --u u_stack.npz \
   --v v_stack.npz \
-  --crop_h 64 \
-  --crop_w 64 \
   --model_type conv2d \
   --device cpu
 ```
@@ -100,7 +70,7 @@ python train.py \
 Use a generated `.npz` mask file:
 
 ```bash
-python train.py --u u_stack.npz --v v_stack.npz --crop_h 64 --crop_w 64 --model_type conv2d --device cpu --mask_npz masks/splits_random_pixels_005_seed0.npz
+python train.py --u u_stack.npz --v v_stack.npz --model_type conv2d --device cpu --mask_npz masks/splits_random_pixels_005_seed0.npz
 ```
 
 The training data loss uses `train_mask`. Validation and test data losses are
@@ -112,8 +82,6 @@ reported from `val_mask` and `test_mask`.
 python train.py \
   --u u_stack.npz \
   --v v_stack.npz \
-  --crop_h 64 \
-  --crop_w 64 \
   --model_type mlp \
   --hidden 64,64,64 \
   --time_stride 20 \
