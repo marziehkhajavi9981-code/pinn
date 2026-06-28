@@ -192,7 +192,6 @@ def main(args: argparse.Namespace) -> None:
     
     X_u, uv = all_point_samples(Xg, Yg, t, U_train, V_train, stride=cfg.time_stride)  # [N', h, w, 3], [N', h, w, 2]
     print(f"✓ X_u shape: {X_u.shape}, uv shape: {uv.shape}")
-    sampled_time_indices = np.arange(N, dtype=np.int32)[::cfg.time_stride]
 
     split_masks = load_split_masks(cfg.mask_npz, (N, H, W), cfg.time_stride, cfg.spatial_downsample)
     eval_split_masks = load_split_masks(cfg.mask_npz, (N, H, W), cfg.time_stride, 1) if cfg.mask_npz else None
@@ -217,14 +216,21 @@ def main(args: argparse.Namespace) -> None:
 
     # --------------- Physics targets (FD) ---------------
     print(f"Computing finite differences and sampling {cfg.n_physics} physics points...")
-    Ux, Uy, Vx, Vy = finite_differences(U_train, V_train, dy=train_dy, dx=train_dx)  # each [N, h, w]
-    physics_time_indices = sampled_time_indices if cfg.model_type in ("conv2d", "conv3d") else None
+    # Work in the strided index space so physics frames/points align with the
+    # training grid (Xu) and the strided split masks.
+    U_phys = U_train[::cfg.time_stride]
+    V_phys = V_train[::cfg.time_stride]
+    t_phys = t[::cfg.time_stride]
+    Ux, Uy, Vx, Vy = finite_differences(U_phys, V_phys, dy=train_dy, dx=train_dx)  # each [N', h, w]
+    # Restrict collocation points to observed *training* locations so the physics
+    # residual never reads held-out val/test frames or pixels.
+    phys_obs_mask = split_masks["train_mask"] if split_masks is not None else None
     X_ph, ph_targets_np = random_physics_samples(
-        x, y, t, Ux, Uy, Vx, Vy, cfg.n_physics, seed=0, time_indices=physics_time_indices
+        x, y, t_phys, Ux, Uy, Vx, Vy, cfg.n_physics, seed=0, obs_mask=phys_obs_mask
     )  # [n_physics, 3], dict of [n_physics, 1]
     print(f"✓ Physics samples: {X_ph.shape}")
-    if physics_time_indices is not None:
-        print(f"  - Conv physics sampled from {len(physics_time_indices)}/{N} strided frames")
+    if phys_obs_mask is not None:
+        print(f"  - Physics restricted to {int(phys_obs_mask.sum()):,} observed training points")
 
     # --------------- Bounds for normalization ---------------
     lb = np.array([x_full.min(), y_full.min(), t.min()], dtype=np.float32)

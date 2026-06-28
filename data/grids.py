@@ -84,33 +84,51 @@ def finite_differences(U: np.ndarray, V: np.ndarray, dy: float, dx: float) -> Tu
 def random_physics_samples(x: np.ndarray, y: np.ndarray, t: np.ndarray,
                            Ux: np.ndarray, Uy: np.ndarray, Vx: np.ndarray, Vy: np.ndarray,
                            n_physics: int, seed: int = 0,
-                           time_indices: np.ndarray = None) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
-    """Sample random interior points (exclude boundary indices) and gather FD targets.
+                           obs_mask: np.ndarray = None) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """Sample interior collocation points and gather their FD targets.
+
+    All arrays are expected in the same (already strided) index space, so frame
+    index k indexes both ``Ux`` and the optional ``obs_mask``.
+
+    When ``obs_mask`` is given (the training split), collocation points are drawn
+    only from observed *training* locations, so the physics residual never reads
+    held-out val/test frames or pixels. (The finite-difference targets are still
+    computed from the dense field, so neighbouring values may be unobserved; this
+    removes frame/time leakage, not neighbour leakage.)
 
     Args:
-        x, y, t: 1D coordinate arrays
+        x, y, t: 1D coordinate arrays (x: [w], y: [h], t: [N])
         Ux, Uy, Vx, Vy: spatial gradient arrays [N, h, w]
         n_physics: number of random samples
         seed: random seed
-        time_indices: optional source frame indices to sample from
-    
+        obs_mask: optional [N, h, w] bool mask of observed training points
+
     Returns:
         X_ph: [n_physics, 3]
         targets: dict with keys 'ux','uy','vx','vy' (each [n_physics, 1])
     """
     N, h, w = Ux.shape
     rng = np.random.default_rng(seed)
-    if time_indices is None:
+    if obs_mask is None:
         k_idx = rng.integers(0, N, size=n_physics, dtype=np.int32)
+        y_idx = rng.integers(1, h - 1, size=n_physics, dtype=np.int32)
+        x_idx = rng.integers(1, w - 1, size=n_physics, dtype=np.int32)
     else:
-        time_indices = np.asarray(time_indices, dtype=np.int32)
-        if time_indices.size == 0:
-            raise ValueError("time_indices must not be empty")
-        if time_indices.min() < 0 or time_indices.max() >= N:
-            raise ValueError(f"time_indices must be within [0, {N - 1}]")
-        k_idx = rng.choice(time_indices, size=n_physics, replace=True).astype(np.int32)
-    y_idx = rng.integers(1, h - 1, size=n_physics, dtype=np.int32)
-    x_idx = rng.integers(1, w - 1, size=n_physics, dtype=np.int32)
+        obs_mask = np.asarray(obs_mask, dtype=bool)
+        if obs_mask.shape != (N, h, w):
+            raise ValueError(f"obs_mask shape {obs_mask.shape} does not match gradient shape {(N, h, w)}")
+        interior = np.zeros((N, h, w), dtype=bool)
+        interior[:, 1:h - 1, 1:w - 1] = True
+        candidates = np.argwhere(obs_mask & interior)  # [M, 3] (k, y, x)
+        if candidates.shape[0] == 0:
+            raise ValueError("No interior observed training points available for physics sampling.")
+        # Sample without replacement: duplicates carry no extra signal, so never
+        # use more points than are actually observed in the training split.
+        n_take = min(n_physics, candidates.shape[0])
+        sel = rng.choice(candidates.shape[0], size=n_take, replace=False)
+        k_idx = candidates[sel, 0].astype(np.int32)
+        y_idx = candidates[sel, 1].astype(np.int32)
+        x_idx = candidates[sel, 2].astype(np.int32)
 
     X_ph = np.stack([x[x_idx], y[y_idx], t[k_idx]], axis=1).astype(np.float32)
     ux_t = Ux[k_idx, y_idx, x_idx][:, None]
