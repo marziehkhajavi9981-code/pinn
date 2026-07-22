@@ -17,8 +17,8 @@ class TrainConfig:
 
     # Loss weights
     w_data: float = 1.0
-    w_div: float = 0.01
-    w_vort: float = 0.01
+    w_div: float = 0.1
+    w_vort: float = 0.1
     w_ux: float = 0
     w_vy: float = 0
 

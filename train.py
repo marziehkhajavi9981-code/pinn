@@ -326,10 +326,11 @@ def main(args: argparse.Namespace) -> None:
 
     # --------------- Visual debug ---------------
     print(f"\nSaving visualizations to {cfg.save_dir}/...")
+    plot_extent = [float(x_full[0]), float(x_full[-1]), float(y_full[0]), float(y_full[-1])]
     imshow3(u_true, U_pred, np.abs(u_true - U_pred), titles=("u true", "u pred", "|error|"),
-            fname=os.path.join(cfg.save_dir, "u_triptych.png"))
+            fname=os.path.join(cfg.save_dir, "u_triptych.png"), extent=plot_extent)
     imshow3(v_true, V_pred, np.abs(v_true - V_pred), titles=("v true", "v pred", "|error|"),
-            fname=os.path.join(cfg.save_dir, "v_triptych.png"))
+            fname=os.path.join(cfg.save_dir, "v_triptych.png"), extent=plot_extent)
     print("  ✓ u_triptych.png, v_triptych.png")
     if eval_split_masks is not None:
         local_eval = frame_eval // cfg.time_stride
@@ -339,10 +340,12 @@ def main(args: argparse.Namespace) -> None:
             test_mask_vis = np.zeros((H, W), dtype=bool)
         imshow3(u_true, U_pred, test_mask_vis.astype(np.float32),
                 titles=("u true (unmasked)", "u pred", "test mask"),
-                fname=os.path.join(cfg.save_dir, "u_test_unmasked_triptych.png"))
+                fname=os.path.join(cfg.save_dir, "u_test_unmasked_triptych.png"), extent=plot_extent,
+                third_label="Mask (0/1)")
         imshow3(v_true, V_pred, test_mask_vis.astype(np.float32),
                 titles=("v true (unmasked)", "v pred", "test mask"),
-                fname=os.path.join(cfg.save_dir, "v_test_unmasked_triptych.png"))
+                fname=os.path.join(cfg.save_dir, "v_test_unmasked_triptych.png"), extent=plot_extent,
+                third_label="Mask (0/1)")
         print("  ✓ u_test_unmasked_triptych.png, v_test_unmasked_triptych.png")
 
     # vorticity maps
@@ -354,7 +357,8 @@ def main(args: argparse.Namespace) -> None:
     dVpred_dy, dVpred_dx = np.gradient(V_pred, 1.0, 1.0)
     omega_pred = dVpred_dx - dUpred_dy
 
-    plot_vorticity(omega_true, omega_pred, fname=os.path.join(cfg.save_dir, "omega_triptych.png"))
+    plot_vorticity(omega_true, omega_pred, fname=os.path.join(cfg.save_dir, "omega_triptych.png"),
+                   extent=plot_extent)
     print("  ✓ omega_triptych.png")
 
     # Optional: quiver plots (downsample)
