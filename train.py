@@ -19,6 +19,7 @@ import time
 from typing import Dict, Optional, Tuple
 import numpy as np
 import torch
+import pandas as pd
 from tqdm import tqdm
 
 from config import TrainConfig
@@ -118,6 +119,146 @@ def all_point_samples(Xg: np.ndarray, Yg: np.ndarray, t: np.ndarray,
     
     return X_all, uv_all
 
+def save_loss_history_excel(
+    loss_hist,
+    save_dir: str,
+    filename: str = "loss_history.xlsx",
+    split_losses: dict = None,
+) -> None:
+    """
+    Save all recorded training losses to an Excel file.
+
+    Works with:
+      1. dict of lists:
+         {
+             "total": [...],
+             "data": [...],
+             "div": [...],
+             "vort": [...],
+             ...
+         }
+
+      2. list of dictionaries:
+         [
+             {"total": ..., "data": ..., ...},
+             {"total": ..., "data": ..., ...},
+         ]
+    """
+
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, filename)
+
+    def to_python_value(value):
+        if torch.is_tensor(value):
+            value = value.detach().cpu()
+
+            if value.numel() == 1:
+                return value.item()
+
+            return value.numpy()
+
+        if isinstance(value, np.generic):
+            return value.item()
+
+        return value
+
+    # -----------------------------------------
+    # Convert loss history to DataFrame
+    # -----------------------------------------
+    if isinstance(loss_hist, dict):
+
+        columns = {}
+
+        for name, values in loss_hist.items():
+
+            # Scalar -> single-item list
+            if torch.is_tensor(values) and values.ndim == 0:
+                values = [values]
+
+            elif np.isscalar(values):
+                values = [values]
+
+            else:
+                values = list(values)
+
+            columns[name] = pd.Series(
+                [to_python_value(v) for v in values]
+            )
+
+        df = pd.DataFrame(columns)
+
+    elif isinstance(loss_hist, (list, tuple)):
+
+        if len(loss_hist) == 0:
+            df = pd.DataFrame()
+
+        elif isinstance(loss_hist[0], dict):
+
+            rows = []
+
+            for item in loss_hist:
+                row = {
+                    key: to_python_value(value)
+                    for key, value in item.items()
+                }
+                rows.append(row)
+
+            df = pd.DataFrame(rows)
+
+        else:
+
+            df = pd.DataFrame({
+                "total_loss": [
+                    to_python_value(v)
+                    for v in loss_hist
+                ]
+            })
+
+    else:
+        raise TypeError(
+            f"Unsupported loss_hist type: {type(loss_hist)}"
+        )
+
+    # Add iteration number
+    if len(df) > 0:
+        df.insert(
+            0,
+            "iteration",
+            np.arange(1, len(df) + 1)
+        )
+
+    # -----------------------------------------
+    # Save Excel
+    # -----------------------------------------
+    with pd.ExcelWriter(
+        save_path,
+        engine="openpyxl"
+    ) as writer:
+
+        # Sheet 1: complete training history
+        df.to_excel(
+            writer,
+            sheet_name="loss_history",
+            index=False
+        )
+
+        # Sheet 2: final train/val/test losses
+        if split_losses is not None:
+
+            split_df = pd.DataFrame([
+                {
+                    key: to_python_value(value)
+                    for key, value in split_losses.items()
+                }
+            ])
+
+            split_df.to_excel(
+                writer,
+                sheet_name="final_split_losses",
+                index=False
+            )
+
+    print(f"✓ Loss history saved to: {save_path}")
 
 def main(args: argparse.Namespace) -> None:
     cfg = TrainConfig()
@@ -293,8 +434,17 @@ def main(args: argparse.Namespace) -> None:
     print(f"{'='*60}\n")
 
     # --------------- Loss curves ---------------
-    plot_losses(model.loss_hist, save_dir=cfg.save_dir)
-    split_eval = model.data_split_losses()
+plot_losses(model.loss_hist, save_dir=cfg.save_dir)
+
+split_eval = model.data_split_losses()
+
+# Save ALL recorded losses to Excel
+save_loss_history_excel(
+    loss_hist=model.loss_hist,
+    save_dir=cfg.save_dir,
+    filename="loss_history.xlsx",
+    split_losses=split_eval,
+)
     if split_masks is not None:
         print("\nFinal masked data losses:")
         print(f"  Train MSE: {split_eval['train_data']:.4e}")
