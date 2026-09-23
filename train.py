@@ -464,6 +464,32 @@ save_loss_history_excel(
     u_true = U[frame_eval]
     v_true = V[frame_eval]
 
+    # Persist the exact full-resolution network outputs used by the field
+    # visualizations below.  This keeps quantitative post-processing tied to
+    # the same frame and predictions shown in the triptych figures.
+    frame_meta = dict(
+        frame_index=np.int64(frame_eval),
+        time=np.float32(t[frame_eval]),
+        x=x_full,
+        y=y_full,
+    )
+    prediction_path = os.path.join(cfg.save_dir, "field_predictions.npz")
+    np.savez_compressed(
+        prediction_path,
+        U_pred=U_pred,
+        V_pred=V_pred,
+        **frame_meta,
+    )
+    truth_path = os.path.join(cfg.save_dir, "field_ground_truth.npz")
+    np.savez_compressed(
+        truth_path,
+        U_true=np.asarray(u_true, dtype=U_pred.dtype),
+        V_true=np.asarray(v_true, dtype=V_pred.dtype),
+        **frame_meta,
+    )
+    print(f"  Saved full-resolution predictions: {prediction_path}")
+    print(f"  Saved matching ground truth: {truth_path}")
+
     print(f"\nEvaluation metrics (frame {frame_eval}):")
     print(f"  RelL2(u): {np.linalg.norm(u_true - U_pred) / (np.linalg.norm(u_true) + 1e-12):.3e}")
     print(f"  MSE(u)={mse(u_true, U_pred):.4e}, R2(u)={r2(u_true, U_pred):.4f}")

@@ -391,14 +391,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create sparse observation masks and train/val/test splits.")
     parser.add_argument("--u", default="u_stack.npz", help="Path to u_stack.npz with key 'U'.")
     parser.add_argument("--v", default="v_stack.npz", help="Path to v_stack.npz with key 'V'.")
-    parser.add_argument("--out", default="masks/splits_random_pixels_015_seed0.npz")
+    parser.add_argument("--out", default="masks/splits_random_pixels_020_seed0.npz")
     parser.add_argument("--html", default="", help="Optional HTML viewer path. Defaults to OUT with .html.")
     parser.add_argument("--max_preview_frames", type=int, default=80)
     parser.add_argument("--no_data_preview", action="store_true",
                         help="Do not embed quantized U/V/speed previews in the HTML viewer.")
     parser.add_argument("--mask_model", default="random_pixels", choices=["random_pixels"],
                         help="Observation mask model. Only independent random pixels are supported.")
-    parser.add_argument("--obs_fraction", type=float, default=0.15)
+    parser.add_argument("--obs_fraction", type=float, default=0.20)
     parser.add_argument("--split_strategy", default="random_pixels",
                         choices=["time_block", "time_random", "random_pixels"])
     parser.add_argument("--train_fraction", type=float, default=0.70)
