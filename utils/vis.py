@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -50,10 +50,24 @@ def plot_losses(loss_hist: Dict[str, list], save_dir: Optional[str] = None) -> N
         plt.show()
 
 
+def _array_aspect(field: np.ndarray, extent) -> Union[float, str]:
+    """Keep the drawn frame at the array's H:W ratio when axes are normalized."""
+    if extent is None:
+        return "equal"
+    height, width = field.shape[:2]
+    x0, x1, y0, y1 = extent
+    data_w = abs(float(x1) - float(x0))
+    data_h = abs(float(y1) - float(y0))
+    if width == 0 or height == 0 or data_w == 0 or data_h == 0:
+        return "equal"
+    return (height / width) * (data_w / data_h)
+
+
 def imshow3(A: np.ndarray, B: np.ndarray, C: np.ndarray, titles=("A", "B", "|A-B|"),
             fname: Optional[str] = None, extent=None, third_label: str = "Absolute error") -> None:
     """Show three maps, with a shared A/B scale and an explicit third-panel scale."""
     fig, axes = plt.subplots(1, 3, figsize=(12, 4.2))
+    aspect = _array_aspect(A, extent)
     ab_min = min(float(np.nanmin(A)), float(np.nanmin(B)))
     ab_max = max(float(np.nanmax(A)), float(np.nanmax(B)))
     c_min = 0.0 if np.nanmin(C) >= 0 else float(np.nanmin(C))
@@ -62,13 +76,13 @@ def imshow3(A: np.ndarray, B: np.ndarray, C: np.ndarray, titles=("A", "B", "|A-B
         c_max = c_min + np.finfo(float).eps
 
     for ax, field, title in zip(axes, (A, B), titles[:2]):
-        image = ax.imshow(field, origin="lower", extent=extent, vmin=ab_min, vmax=ab_max)
+        image = ax.imshow(field, origin="lower", extent=extent, aspect=aspect, vmin=ab_min, vmax=ab_max)
         ax.set_title(title)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         fig.colorbar(image, ax=ax, label="Value")
 
-    image = axes[2].imshow(C, origin="lower", extent=extent, vmin=c_min, vmax=c_max)
+    image = axes[2].imshow(C, origin="lower", extent=extent, aspect=aspect, vmin=c_min, vmax=c_max)
     axes[2].set_title(titles[2])
     axes[2].set_xlabel("x")
     axes[2].set_ylabel("y")
@@ -87,12 +101,13 @@ def plot_vorticity(omega_true: np.ndarray, omega_pred: np.ndarray, fname: Option
     err = np.abs(omega_true - omega_pred)
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4.2))
+    aspect = _array_aspect(omega_true, extent)
     for ax, field, title in zip(axes[:2], (omega_true, omega_pred), ("ω (true)", "ω (pred)")):
-        image = ax.imshow(field, origin="lower", extent=extent, vmin=vmin, vmax=vmax)
+        image = ax.imshow(field, origin="lower", extent=extent, aspect=aspect, vmin=vmin, vmax=vmax)
         ax.set_title(title); ax.set_xlabel("x"); ax.set_ylabel("y")
         fig.colorbar(image, ax=ax, label="Vorticity")
     err_max = max(float(np.nanmax(err)), np.finfo(float).eps)
-    image = axes[2].imshow(err, origin="lower", extent=extent, vmin=0.0, vmax=err_max)
+    image = axes[2].imshow(err, origin="lower", extent=extent, aspect=aspect, vmin=0.0, vmax=err_max)
     axes[2].set_title("|ω error|"); axes[2].set_xlabel("x"); axes[2].set_ylabel("y")
     fig.colorbar(image, ax=axes[2], label="Absolute error")
     plt.tight_layout()
