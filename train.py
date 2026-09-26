@@ -228,37 +228,32 @@ def save_loss_history_excel(
         )
 
     # -----------------------------------------
-    # Save Excel
+    # Save Excel (CSV fallback if openpyxl is missing)
     # -----------------------------------------
-    with pd.ExcelWriter(
-        save_path,
-        engine="openpyxl"
-    ) as writer:
+    split_df = None
+    if split_losses is not None:
+        split_df = pd.DataFrame([
+            {
+                key: to_python_value(value)
+                for key, value in split_losses.items()
+            }
+        ])
 
-        # Sheet 1: complete training history
-        df.to_excel(
-            writer,
-            sheet_name="loss_history",
-            index=False
-        )
-
-        # Sheet 2: final train/val/test losses
-        if split_losses is not None:
-
-            split_df = pd.DataFrame([
-                {
-                    key: to_python_value(value)
-                    for key, value in split_losses.items()
-                }
-            ])
-
-            split_df.to_excel(
-                writer,
-                sheet_name="final_split_losses",
-                index=False
-            )
-
-    print(f"✓ Loss history saved to: {save_path}")
+    try:
+        with pd.ExcelWriter(save_path, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="loss_history", index=False)
+            if split_df is not None:
+                split_df.to_excel(writer, sheet_name="final_split_losses", index=False)
+        print(f"✓ Loss history saved to: {save_path}")
+    except (ModuleNotFoundError, ImportError) as exc:
+        csv_path = os.path.splitext(save_path)[0] + ".csv"
+        df.to_csv(csv_path, index=False)
+        if split_df is not None:
+            split_csv = os.path.splitext(save_path)[0] + "_split_losses.csv"
+            split_df.to_csv(split_csv, index=False)
+            print(f"! Excel export skipped ({exc}). Wrote {csv_path} and {split_csv}")
+        else:
+            print(f"! Excel export skipped ({exc}). Wrote {csv_path}")
 
 def main(args: argparse.Namespace) -> None:
     cfg = TrainConfig()
@@ -301,7 +296,9 @@ def main(args: argparse.Namespace) -> None:
 
     # --------------- Coordinates ---------------
     print("Building coordinate grids...")
-    dx = dy = dt = 1.0
+    dx = 1.0 / W
+    dy = 1.0 / H
+    dt = 1.0
     x_full, y_full, t, Xg_full, Yg_full = make_space_time_grids(N, H, W, dx, dy, dt)
     print(f"✓ Created full grids: x={x_full.shape}, y={y_full.shape}, t={t.shape}")
 
@@ -434,17 +431,17 @@ def main(args: argparse.Namespace) -> None:
     print(f"{'='*60}\n")
 
     # --------------- Loss curves ---------------
-plot_losses(model.loss_hist, save_dir=cfg.save_dir)
+    plot_losses(model.loss_hist, save_dir=cfg.save_dir)
 
-split_eval = model.data_split_losses()
+    split_eval = model.data_split_losses()
 
-# Save ALL recorded losses to Excel
-save_loss_history_excel(
-    loss_hist=model.loss_hist,
-    save_dir=cfg.save_dir,
-    filename="loss_history.xlsx",
-    split_losses=split_eval,
-)
+    # Save ALL recorded losses to Excel
+    save_loss_history_excel(
+        loss_hist=model.loss_hist,
+        save_dir=cfg.save_dir,
+        filename="loss_history.xlsx",
+        split_losses=split_eval,
+    )
     if split_masks is not None:
         print("\nFinal masked data losses:")
         print(f"  Train MSE: {split_eval['train_data']:.4e}")
@@ -525,12 +522,12 @@ save_loss_history_excel(
         print("  ✓ u_test_unmasked_triptych.png, v_test_unmasked_triptych.png")
 
     # vorticity maps
-    dU_dy, dU_dx = np.gradient(u_true, 1.0, 1.0)
-    dV_dy, dV_dx = np.gradient(v_true, 1.0, 1.0)
+    dU_dy, dU_dx = np.gradient(u_true, dy, dx)
+    dV_dy, dV_dx = np.gradient(v_true, dy, dx)
     omega_true = dV_dx - dU_dy
 
-    dUpred_dy, dUpred_dx = np.gradient(U_pred, 1.0, 1.0)
-    dVpred_dy, dVpred_dx = np.gradient(V_pred, 1.0, 1.0)
+    dUpred_dy, dUpred_dx = np.gradient(U_pred, dy, dx)
+    dVpred_dy, dVpred_dx = np.gradient(V_pred, dy, dx)
     omega_pred = dVpred_dx - dUpred_dy
 
     plot_vorticity(omega_true, omega_pred, fname=os.path.join(cfg.save_dir, "omega_triptych.png"),
