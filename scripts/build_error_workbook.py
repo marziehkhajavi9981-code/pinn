@@ -13,8 +13,8 @@ from openpyxl.utils import get_column_letter
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PREDICTIONS_PATH = ROOT / "outputs" / "field_predictions.npz"
-SAVED_TRUTH_PATH = ROOT / "outputs" / "field_ground_truth.npz"
+PREDICTIONS_PATH = ROOT / "outputs" / "field_predictions .npz"
+SAVED_TRUTH_PATH = ROOT / "outputs" / "field_ground_truth .npz"
 TRUTH_PATH = ROOT / "u_stack.npz"
 THREAD_ID = "019fb973-f9ab-7fa3-ae22-6b338a8db385"
 OUTPUT_DIR = ROOT / "outputs" / THREAD_ID

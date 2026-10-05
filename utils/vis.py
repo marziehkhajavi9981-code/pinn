@@ -9,44 +9,178 @@ def ensure_dir(path: str) -> None:
         os.makedirs(path, exist_ok=True)
 
 
-def plot_losses(loss_hist: Dict[str, list], save_dir: Optional[str] = None) -> None:
-    """Plot loss curves on a log scale.
+def plot_losses(
+    loss_hist: Dict[str, list],
+    weights: Dict[str, float],
+    save_dir: Optional[str] = None
+) -> None:
 
-    Args:
-        loss_hist: dict of lists with keys 'total','data','div','vort','ux','vy'
-        save_dir: optional directory to save the figure
-    """
+    # =========================================================
+    # 1) RAW LOSSES
+    # =========================================================
     plt.figure(figsize=(10, 4))
+
     for k in ["total", "data", "div", "vort", "ux", "vy"]:
         if k in loss_hist and len(loss_hist[k]) > 0:
-            plt.semilogy(loss_hist[k], label=k)
+            plt.semilogy(
+                loss_hist[k],
+                label=k
+            )
+
     plt.xlabel("Iterations (logged)")
-    plt.ylabel("Loss (log)")
-    plt.title("Loss history")
+    plt.ylabel("Raw loss (log)")
+    plt.title("Raw loss history")
     plt.legend()
     plt.tight_layout()
+
     if save_dir:
         ensure_dir(save_dir)
-        plt.savefig(os.path.join(save_dir, "loss_history.png"), dpi=150)
+        plt.savefig(
+            os.path.join(save_dir, "raw_loss_history.png"),
+            dpi=150
+        )
+
     plt.show()
 
-    split_keys = ["train_data", "val_data", "test_data"]
-    if any(k in loss_hist and len(loss_hist[k]) > 0 for k in split_keys):
+
+    # =========================================================
+    # 2) WEIGHTED LOSS CONTRIBUTIONS
+    # =========================================================
+    plt.figure(figsize=(10, 4))
+
+    # total is already weighted
+    if "total" in loss_hist and len(loss_hist["total"]) > 0:
+        plt.semilogy(
+            loss_hist["total"],
+            label="total"
+        )
+
+    # Weighted individual components
+    for k in ["data", "div", "vort", "ux", "vy"]:
+
+        if k not in loss_hist or len(loss_hist[k]) == 0:
+            continue
+
+        w = weights.get(k, 1.0)
+
+        # Zero contribution cannot be plotted on log scale
+        if w == 0:
+            continue
+
+        raw_values = np.asarray(
+            loss_hist[k],
+            dtype=np.float64
+        )
+
+        weighted_values = w * raw_values
+
+        plt.semilogy(
+            weighted_values,
+            label=f"{k} × {w:g}"
+        )
+
+    plt.xlabel("Iterations (logged)")
+    plt.ylabel("Weighted contribution (log)")
+    plt.title("Weighted loss contributions")
+    plt.legend()
+    plt.tight_layout()
+
+    if save_dir:
+        ensure_dir(save_dir)
+        plt.savefig(
+            os.path.join(save_dir, "weighted_loss_history.png"),
+            dpi=150
+        )
+
+    plt.show()
+
+
+    # =========================================================
+    # 3) OPTIONAL CHECK:
+    # total should equal sum of weighted components
+    # =========================================================
+    if "total" in loss_hist and len(loss_hist["total"]) > 0:
+
+        total = np.asarray(
+            loss_hist["total"],
+            dtype=np.float64
+        )
+
+        reconstructed_total = np.zeros_like(total)
+
+        for k in ["data", "div", "vort", "ux", "vy"]:
+
+            if k in loss_hist and len(loss_hist[k]) == len(total):
+
+                reconstructed_total += (
+                    weights.get(k, 1.0)
+                    * np.asarray(loss_hist[k], dtype=np.float64)
+                )
+
+        max_error = np.max(
+            np.abs(total - reconstructed_total)
+        )
+
+        print(
+            f"Max difference between stored total "
+            f"and reconstructed weighted total: {max_error:.3e}"
+        )
+
+
+    # =========================================================
+    # 4) TRAIN / VAL / TEST DATA LOSS
+    # =========================================================
+    split_keys = [
+        "train_data",
+        "val_data",
+        "test_data"
+    ]
+
+    if any(
+        k in loss_hist and len(loss_hist[k]) > 0
+        for k in split_keys
+    ):
+
         plt.figure(figsize=(8, 4))
+
         for k in split_keys:
-            values = np.asarray(loss_hist.get(k, []), dtype=np.float64)
+
+            values = np.asarray(
+                loss_hist.get(k, []),
+                dtype=np.float64
+            )
+
             if values.size:
+
                 finite = np.isfinite(values)
+
                 if finite.any():
-                    plt.semilogy(np.where(finite, values, np.nan), label=k)
+
+                    plt.semilogy(
+                        np.where(
+                            finite,
+                            values,
+                            np.nan
+                        ),
+                        label=k
+                    )
+
         plt.xlabel("Iterations (logged)")
         plt.ylabel("Masked data MSE (log)")
         plt.title("Train / val / test data loss")
         plt.legend()
         plt.tight_layout()
+
         if save_dir:
             ensure_dir(save_dir)
-            plt.savefig(os.path.join(save_dir, "split_data_loss_history.png"), dpi=150)
+            plt.savefig(
+                os.path.join(
+                    save_dir,
+                    "split_data_loss_history.png"
+                ),
+                dpi=150
+            )
+
         plt.show()
 
 

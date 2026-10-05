@@ -431,7 +431,19 @@ def main(args: argparse.Namespace) -> None:
     print(f"{'='*60}\n")
 
     # --------------- Loss curves ---------------
-    plot_losses(model.loss_hist, save_dir=cfg.save_dir)
+    weights = {
+    "data": cfg.w_data,
+    "div": cfg.w_div,
+    "vort": cfg.w_vort,
+    "ux": cfg.w_ux,
+    "vy": cfg.w_vy,
+}
+
+plot_losses(
+    model.loss_hist,
+    weights=weights,
+    save_dir=cfg.save_dir
+)
 
     split_eval = model.data_split_losses()
 
